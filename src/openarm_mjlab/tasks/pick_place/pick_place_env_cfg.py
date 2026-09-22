@@ -296,8 +296,9 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mdp.joint_pos_limits,
             weight=-10.0,
             # Arm joints only: the fingers' whole range [0, 0.7854] is
-            # functional (fully open = qpos 0 is the default posture), so a
-            # soft-limit band would tax normal open/close postures.
+            # functional (qpos 0.7854 = fully open is the home posture the
+            # episode starts from, qpos 0 = fully closed), so a soft-limit
+            # band would tax normal open/close postures.
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot", joint_names=("openarm_left_joint[1-7]",)

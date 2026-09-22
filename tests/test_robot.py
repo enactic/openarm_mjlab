@@ -32,10 +32,18 @@ EXPECTED_JOINTS = [f"openarm_left_joint{i}" for i in range(1, 8)] + [
 EXPECTED_ACTUATORS = [f"left_joint{i}_ctrl" for i in range(1, 8)] + [
     "left_finger1_ctrl"
 ]
+RIGHT_FINGERTIP_GEOMS = [
+    f"finger_{k}_right_collision_{i:02d}" for k in ("inner", "outer") for i in range(4)
+]
 
 
 def test_grasp_site_at_fingertip_centroid():
-    """The grasp site must sit at the centroid of the fingertip collision geoms."""
+    """The grasp site must sit at the fingertip centroid with the jaw closed.
+
+    The site is a fixed point in the wrist frame marking where a grasped cube
+    sits, so it is anchored to the closed jaw (finger qpos 0), not to the open
+    jaw the episode starts from.
+    """
     model = get_openarm_cell_spec().compile()
     data = mujoco.MjData(model)
     data.qpos[model.joint("openarm_left_joint4").qposadr[0]] = LEFT_JOINT4_HOME
@@ -80,6 +88,14 @@ def test_frozen_right_arm_matches_home_pose():
         data.site("left_ee_control_point").xpos, ref_left_ee, atol=1e-6
     )
 
+    # The frozen right gripper must hold the home jaw opening too. Deleting a
+    # joint pins it at qpos 0, so this only holds because every frozen joint's
+    # home angle is baked into its body frame, not just joint4's.
+    for name in RIGHT_FINGERTIP_GEOMS:
+        np.testing.assert_allclose(
+            data.geom(name).xpos, ref_data.geom(name).xpos, atol=1e-6
+        )
+
 
 def test_fingertip_collision_overrides():
     """Fingertips get condim=6 grasp contacts; other geoms keep their XML values."""
@@ -104,8 +120,12 @@ def test_entity_builds_with_xml_actuators():
     assert model.nu == 8
     assert robot.is_fixed_base
     assert robot.is_actuated
-    # init_state keyframe: left joint4 at home, everything else 0.
-    key = model.key(0)
-    qpos = np.zeros(9)
-    qpos[3] = LEFT_JOINT4_HOME
-    np.testing.assert_allclose(key.qpos, qpos, atol=1e-6)
+    # The init keyframe must reproduce the asset's home pose for every left
+    # joint (elbow bent, jaw open) rather than the joint-zero posture, so an
+    # openarm_mujoco home-pose change cannot silently drop out of INIT_STATE.
+    ref_model = mujoco.MjSpec.from_file(str(OPENARM_CELL_XML)).compile()
+    ref_key = ref_model.key("home")
+    expected = [
+        ref_key.qpos[ref_model.joint(name).qposadr[0]] for name in EXPECTED_JOINTS
+    ]
+    np.testing.assert_allclose(model.key(0).qpos, expected, atol=1e-6)

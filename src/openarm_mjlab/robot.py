@@ -69,9 +69,11 @@ _FROZEN_ACTUATORS = (
 )
 
 # Center of the left gripper opening (centroid of the 8 fingertip collision
-# geoms at home pose), in the openarm_left_ee_base_link frame. This is where
-# a grasped object's center sits, so reach rewards target it instead of the
-# wrist-mounted left_ee_control_point site.
+# geoms with the jaw closed, i.e. finger qpos 0), in the
+# openarm_left_ee_base_link frame. This is where a grasped object's center
+# sits, so reach rewards target it instead of the wrist-mounted
+# left_ee_control_point site. Anchored to the closed jaw rather than to the
+# home pose, because home is the *open* jaw the episode starts from.
 LEFT_GRASP_SITE = "left_grasp_site"
 _LEFT_GRASP_SITE_POS = (-0.0039, 0.0, -0.1349)
 
@@ -94,6 +96,40 @@ FINGERTIP_COLLISION = CollisionCfg(
 )
 
 
+def _bake_frozen_home_pose(spec: mujoco.MjSpec) -> None:
+    """Fold every frozen joint's home angle into the body frame it drives.
+
+    Freezing deletes the joint, which pins it at qpos 0, so a joint with a
+    non-zero home angle would freeze in the wrong posture. Pre-rotating the
+    owning body by that angle makes the deleted joint hold its home offset
+    instead. Applies to the bent right elbow and to the open right jaw.
+
+    Only a hinge anchored at its body origin can be baked as a pure body
+    rotation — fail loudly if an openarm_mujoco update introduces anything
+    else, rather than freezing the arm in a silently wrong pose.
+    """
+    for name in _FROZEN_JOINTS:
+        angle = _HOME_ANGLES[name]
+        if angle == 0.0:
+            continue
+        joint = spec.joint(name)
+        if joint.type != mujoco.mjtJoint.mjJNT_HINGE:
+            raise ValueError(
+                f"frozen joint {name} has home angle {angle} but is "
+                f"{joint.type}, and only hinges can be baked into a body frame"
+            )
+        if not np.allclose(joint.pos, 0.0):
+            raise ValueError(
+                f"bake assumes the {name} anchor at the body origin, got {joint.pos}"
+            )
+        quat = np.zeros(4)
+        mujoco.mju_axisAngle2Quat(quat, np.asarray(joint.axis), angle)
+        body = joint.parent
+        baked = np.zeros(4)
+        mujoco.mju_mulQuat(baked, body.quat, quat)
+        body.quat = baked
+
+
 def get_openarm_cell_spec() -> mujoco.MjSpec:
     """Load the OpenArm Cell spec, freezing the right arm for pick & place."""
     spec = mujoco.MjSpec.from_file(str(OPENARM_CELL_XML))
@@ -103,27 +139,7 @@ def get_openarm_cell_spec() -> mujoco.MjSpec:
     # default to avoid the attach-conflict warning.
     spec.option.timestep = 0.002
 
-    # Bake the right joint4 home angle into the link4 body frame so the arm
-    # freezes in the home posture, not the joint-zero posture. The bake
-    # handles only joint4, so every other frozen joint must be zero at home
-    # — fail loudly if an asset update changes that.
-    for name in _FROZEN_JOINTS:
-        if name != "openarm_right_joint4" and _HOME_ANGLES[name] != 0.0:
-            raise ValueError(
-                f"frozen joint {name} has home angle {_HOME_ANGLES[name]}, "
-                "but only openarm_right_joint4 is baked"
-            )
-    joint4 = spec.joint("openarm_right_joint4")
-    if not np.allclose(joint4.pos, 0.0):
-        raise ValueError("bake assumes the joint4 anchor at the body origin")
-    quat = np.zeros(4)
-    mujoco.mju_axisAngle2Quat(
-        quat, np.asarray(joint4.axis), _HOME_ANGLES["openarm_right_joint4"]
-    )
-    body = spec.body("openarm_right_link4")
-    baked = np.zeros(4)
-    mujoco.mju_mulQuat(baked, body.quat, quat)
-    body.quat = baked
+    _bake_frozen_home_pose(spec)
 
     for name in _FROZEN_JOINTS:
         spec.delete(spec.joint(name))
