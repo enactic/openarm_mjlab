@@ -37,6 +37,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ...robot import (
+    LEFT_FINGER_HOME,
     LEFT_FINGERTIP_GEOMS,
     LEFT_GRASP_SITE,
     TABLE_TOP_Z,
@@ -175,9 +176,15 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "openarm_left_joint[1-7]",
                 "openarm_left_finger_joint1",
             ),
+            # use_default_offset puts each offset at the home pose, and the
+            # asset's home jaw is fully OPEN at the top of the finger range.
+            # A finger action therefore only has room to close, so its scale
+            # spans the whole range: action -1 shuts the jaw, 0 holds it open.
+            # A smaller scale cannot reach a grasp at all — the 4 cm cube needs
+            # the jaw below ~0.16 rad, which 0.4 never reaches from 0.7854.
             scale={
                 "openarm_left_joint[1-7]": 0.5,
-                "openarm_left_finger_joint1": 0.4,
+                "openarm_left_finger_joint1": LEFT_FINGER_HOME,
             },
             use_default_offset=True,
         )

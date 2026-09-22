@@ -55,6 +55,11 @@ def _load_asset_constants() -> tuple[dict[str, float], float]:
 
 _HOME_ANGLES, TABLE_TOP_Z = _load_asset_constants()
 LEFT_JOINT4_HOME = _HOME_ANGLES["openarm_left_joint4"]
+# Home is the fully OPEN jaw and the finger range runs down to 0 (fully
+# closed), so this doubles as the span a finger action must cover to close
+# the gripper. Read from the asset so an openarm_mujoco jaw-range change
+# cannot leave the action unable to reach the closed jaw.
+LEFT_FINGER_HOME = _HOME_ANGLES["openarm_left_finger_joint1"]
 
 _FROZEN_JOINTS = (
     "openarm_lifter_joint",

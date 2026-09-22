@@ -67,6 +67,24 @@ def test_env_steps_with_finite_signals(env):
         assert truncated.shape == (2,)
 
 
+def test_gripper_action_reaches_the_closed_jaw(env):
+    """Action -1 must shut the jaw, or the policy can never grasp the cube.
+
+    `use_default_offset` anchors the finger offset to the home pose, which the
+    asset defines as the fully OPEN jaw, so the scale has to span the whole
+    finger range for the closed jaw to be reachable inside the nominal action
+    band. Regression test for openarm-mujoco 2.3.0, which moved home from the
+    closed jaw to the open one and left the old scale unable to reach a grasp.
+    """
+    from openarm_mjlab.robot import LEFT_FINGER_HOME
+
+    term = env.action_manager.get_term("joint_pos")
+    i = term.target_names.index("openarm_left_finger_joint1")
+    assert term.offset[0, i].item() == pytest.approx(LEFT_FINGER_HOME)
+    # action -1 lands on the closed jaw (qpos 0), not short of it.
+    assert (term.offset[0, i] - term.scale[0, i]).item() == pytest.approx(0.0)
+
+
 def test_cube_spawns_on_table_after_reset(env):
     env.reset()
     cube_pos = env.scene["cube"].data.root_link_pos_w
