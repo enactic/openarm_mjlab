@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenArm task registrations. Importing this package registers all tasks."""
+"""Run a trained policy outside mjlab.
 
-from . import door  # noqa: F401
-from . import drawer  # noqa: F401
-from . import families  # noqa: F401
-from . import pick_place  # noqa: F401
-from . import puck  # noqa: F401
-from . import reach  # noqa: F401
-from . import valve  # noqa: F401
+Exports a policy to ONNX together with the contract a deployment target needs
+to use it -- action scale and offset, actuator order, decimation, solver
+settings and joint limits -- and provides a plain-MuJoCo runner that consumes
+both. Nothing here imports mujoco-warp or requires a GPU at inference.
+"""
