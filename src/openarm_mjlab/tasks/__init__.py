@@ -16,6 +16,7 @@
 
 from . import door  # noqa: F401
 from . import drawer  # noqa: F401
+from . import multitask  # noqa: F401
 from . import pick_place  # noqa: F401
 from . import puck  # noqa: F401
 from . import reach  # noqa: F401
