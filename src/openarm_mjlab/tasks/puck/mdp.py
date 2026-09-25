@@ -53,11 +53,82 @@ SETTLED_SPEED = 0.05  # m/s
 MAX_PUSH_SPEED = 0.25  # m/s, puck speed cap for the rate reward.
 
 
+# Named targets for the language-conditioned variant. The default is the one
+# this task has always used, so nothing here changes an existing run; the
+# alternative exists so an instruction can choose between them. "left" mirrors
+# the default across the puck's own start line, giving the same push distance
+# in the opposite lateral direction.
+NAMED_GOALS = {
+    "right": (0.33, -0.30, 0.422),
+    "left": (0.33, 0.02, 0.422),
+}
+assert NAMED_GOALS["right"] == GOAL_LOCAL, "the default target must stay the default"
+
+
+def goal_buf(env) -> torch.Tensor:
+    """Per-env target, defaulting to the one the task has always used."""
+    if not hasattr(env, "_puck_goal"):
+        env._puck_goal = (
+            torch.tensor(GOAL_LOCAL, device=env.device).expand(env.num_envs, 3).clone()
+        )
+    return env._puck_goal
+
+
+def _named_goal(env, name: str) -> torch.Tensor:
+    """Return a cached device tensor for a named target.
+
+    These are constants, and both callers run every step at up to a few
+    thousand envs; rebuilding them from a Python tuple is a host-to-device
+    copy each time.
+    """
+    cache = getattr(env, "_named_goal_cache", None)
+    if cache is None:
+        cache = env._named_goal_cache = {}
+    if name not in cache:
+        cache[name] = torch.tensor(
+            NAMED_GOALS[name], device=env.device, dtype=torch.float32
+        )
+    return cache[name]
+
+
+def set_puck_goal(env, env_ids: torch.Tensor, name: str) -> None:
+    """Point the given envs at a named target."""
+    goal_buf(env)[env_ids] = _named_goal(env, name)
+
+
+def puck_to_midpoint_obs(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    robot_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Vector from the puck to the MIDPOINT of the named targets.
+
+    The language variant substitutes this for ``puck_to_goal_obs``, which
+    points straight at the active target and would make the instruction
+    redundant.
+
+    It points at the midpoint rather than, say, the puck's own position
+    because the substitute has to keep the same MEANING as well as the same
+    width. Replacing "vector from the puck to somewhere worth pushing" with
+    "position of the puck" preserves the shape and changes what the numbers
+    are, and a policy carried over from a checkpoint trained on the old
+    meaning reads the new ones as the old quantity: measured, success went to
+    0.000 for both goals and stayed there. The midpoint is the same kind of
+    vector at the same scale, and identical for both goals, so it says
+    nothing about which one was asked for.
+    """
+    robot: Entity = env.scene[robot_cfg.name]
+    midpoint = ((_named_goal(env, "right") + _named_goal(env, "left")) / 2).expand(
+        env.num_envs, 3
+    )
+    vec_w = midpoint - puck_pos_w(env, asset_cfg)
+    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
+
+
 def _goal_w(env) -> torch.Tensor:
     # mjlab batches each env as its OWN world: physics coordinates are
     # raw; env_origins is only a viewer layout grid. Do NOT add origins.
-    goal = torch.tensor(GOAL_LOCAL, device=env.device)
-    return goal.expand(env.num_envs, 3)
+    return goal_buf(env)
 
 
 def puck_pos_w(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -201,8 +272,18 @@ def reset_puck_uniform(
     puck.write_root_state_to_sim(state, env_ids=env_ids)
     # Seed the rate buffer from the WRITTEN positions: derived kinematics
     # are stale inside reset events.
-    goal = torch.tensor(GOAL_LOCAL, device=env.device)
-    d = torch.linalg.norm(state[:, :2] - goal[:2], dim=-1)
+    #
+    # Against the PER-ENV goal, not the module constant. With a single fixed
+    # target the two were the same thing; once an instruction can name a
+    # different target they are not, and seeding from the constant gives the
+    # progress-shaping term a baseline measured to the wrong place. The puck
+    # spawns with +-xy_range jitter, so the error is up to a few centimetres
+    # and `clamp(min_dist - dist, min=0)` pays it out as free progress on the
+    # first contact step -- asymmetrically, for whichever goal is not the
+    # constant. The instruction sampler runs first among the reset events, so
+    # goal_buf is already correct here.
+    goal = goal_buf(env)[env_ids]
+    d = torch.linalg.norm(state[:, :2] - goal[:, :2], dim=-1)
     if not hasattr(env, "_puck_min_dist"):
         env._puck_min_dist = puck_goal_dist(env, asset_cfg).clone()
     env._puck_min_dist[env_ids] = d

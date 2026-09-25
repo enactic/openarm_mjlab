@@ -12,12 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenArm task registrations. Importing this package registers all tasks."""
+"""Language-conditioned manipulation: the target is named, not observed."""
 
-from . import door  # noqa: F401
-from . import drawer  # noqa: F401
-from . import language  # noqa: F401
-from . import pick_place  # noqa: F401
-from . import puck  # noqa: F401
-from . import reach  # noqa: F401
-from . import valve  # noqa: F401
+from mjlab.tasks.registry import register_mjlab_task
+
+from openarm_mjlab.tasks.language.env_cfg import (
+    openarm_language_puck_env_cfg,
+    openarm_language_puck_ppo_runner_cfg,
+)
+
+register_mjlab_task(
+    task_id="OpenArm-Puck-Language",
+    env_cfg=openarm_language_puck_env_cfg(),
+    play_env_cfg=openarm_language_puck_env_cfg(play=True),
+    rl_cfg=openarm_language_puck_ppo_runner_cfg(),
+)
