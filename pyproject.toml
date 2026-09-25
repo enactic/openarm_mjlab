@@ -32,6 +32,7 @@ Issues = "https://github.com/enactic/openarm_mjlab/issues"
 Repository = "https://github.com/enactic/openarm_mjlab"
 
 [project.scripts]
+openarm-mjlab-eval = "openarm_mjlab.eval:main"
 openarm-mjlab-play = "openarm_mjlab.play:main"
 openarm-mjlab-train = "openarm_mjlab.train:main"
 

@@ -43,6 +43,19 @@ CUDA_VISIBLE_DEVICES= uv run openarm-mjlab-train OpenArm-PickPlace \
 uv run openarm-mjlab-play OpenArm-PickPlace --checkpoint-file <path/to/checkpoint>
 ```
 
+## Measure a success rate
+
+```bash
+uv run openarm-mjlab-eval OpenArm-PickPlace
+```
+
+Rolls out one episode per environment and reports the fraction that reach
+the task's success termination, alongside the rate of every other
+termination term. Defaults to the latest checkpoint for the task and 256
+episodes; pass `--checkpoint` and `--num-envs` to change either. When a
+task has more than one candidate success condition, name it explicitly
+with `--success-term`.
+
 ## Tests
 
 ```bash
