@@ -10,14 +10,14 @@ to `openarm-mjlab-train` or `openarm-mjlab-play`.
 
 | Task Description | Task Name | Demo |
 | --- | --- | --- |
-| Reach a target position with the right gripper. | `OpenArm-Reach` | [Watch video](assets/OpenArm-Reach.mp4) |
-| Grip a block with the right arm, lift it, and hold it above the table. | `OpenArm-Lift` | [Watch video](assets/OpenArm-Lift.mp4) |
-| Grip both ends of a bar and lift it using both arms together. | `OpenArm-BimanualLift` | [Watch video](assets/OpenArm-BimanualLift.mp4) |
-| Pick the orange cube from the table with the left arm and place it in the black tray in the full OpenArm Cell scene. The right arm and lifter stay at home. | `OpenArm-PickPlace` | [Watch video](assets/OpenArm-PickPlace.mp4) |
-| Push a puck into the goal area and leave it there. The Vision variant uses overhead depth-camera observations instead of privileged puck-position observations. | `OpenArm-Puck`<br>`OpenArm-Puck-Vision` | [Watch video](assets/OpenArm-Puck.mp4) |
-| Grasp the handle and swing the door open. | `OpenArm-Door` | [Watch video](assets/OpenArm-Door.mp4) |
-| Grasp the handle and pull the drawer open. | `OpenArm-Drawer` | [Watch video](assets/OpenArm-Drawer.mp4) |
-| Grasp the lever and turn the valve. | `OpenArm-Valve` | [Watch video](assets/OpenArm-Valve.mp4) |
+| Reach a target position with the right gripper. | `OpenArm-Reach` | <img src="assets/OpenArm-Reach.gif" alt="OpenArm-Reach demo" width="400"/> |
+| Grip a block with the right arm, lift it, and hold it above the table. | `OpenArm-Lift` | <img src="assets/OpenArm-Lift.gif" alt="OpenArm-Lift demo" width="400"/> |
+| Grip both ends of a bar and lift it using both arms together. | `OpenArm-BimanualLift` | <img src="assets/OpenArm-BimanualLift.gif" alt="OpenArm-BimanualLift demo" width="400"/> |
+| Pick the orange cube from the table with the left arm and place it in the black tray in the full OpenArm Cell scene. The right arm and lifter stay at home. | `OpenArm-PickPlace` | <img src="assets/OpenArm-PickPlace.gif" alt="OpenArm-PickPlace demo" width="400"/> |
+| Push a puck into the goal area and leave it there. The Vision variant uses overhead depth-camera observations instead of privileged puck-position observations. | `OpenArm-Puck`<br>`OpenArm-Puck-Vision` | <img src="assets/OpenArm-Puck.gif" alt="OpenArm-Puck demo" width="400"/> |
+| Grasp the handle and swing the door open. | `OpenArm-Door` | <img src="assets/OpenArm-Door.gif" alt="OpenArm-Door demo" width="400"/> |
+| Grasp the handle and pull the drawer open. | `OpenArm-Drawer` | <img src="assets/OpenArm-Drawer.gif" alt="OpenArm-Drawer demo" width="400"/> |
+| Grasp the lever and turn the valve. | `OpenArm-Valve` | <img src="assets/OpenArm-Valve.gif" alt="OpenArm-Valve demo" width="400"/> |
 
 ## Setup
 
