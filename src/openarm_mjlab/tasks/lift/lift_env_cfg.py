@@ -41,7 +41,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ...actions import HoldDefaultPositionActionCfg
-from ...robot_bimanual import (
+from ...openarm_bimanual import (
     BIMANUAL_ACTION_SCALE,
     EE_SITE_RIGHT,
     get_bimanual_robot_cfg,
@@ -228,7 +228,7 @@ def openarm_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=base_mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5)
         ),
         "tool_to_block": ObservationTermCfg(
-            func=lift_mdp.tool_to_block_obs,
+            func=lift_mdp.tool_to_object_obs,
             params={"robot_cfg": ROBOT_EE_CFG, "asset_cfg": BLOCK_CFG},
             noise=Unoise(n_min=-0.01, n_max=0.01),
         ),
@@ -333,7 +333,7 @@ def openarm_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
     rewards = {
         "reach_block": RewardTermCfg(
-            func=lift_mdp.reach_block_reward,
+            func=lift_mdp.reach_object_reward,
             weight=1.0,
             params={"std": 0.2, "robot_cfg": ROBOT_EE_CFG, "asset_cfg": BLOCK_CFG},
         ),
@@ -371,10 +371,12 @@ def openarm_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # strategy, not just on average. 2400 (48.0 real reward) is
         # comfortably above the measured ~42.4 camping-income ceiling.
         "success": RewardTermCfg(
-            func=lift_mdp.lift_success_bonus, weight=2400.0, params={}
+            func=lift_mdp.terminated_by,
+            weight=2400.0,
+            params={"term_name": "lifted_target"},
         ),
         "descent": RewardTermCfg(
-            func=lift_mdp.block_descent_penalty,
+            func=lift_mdp.descent_penalty,
             weight=-2.0,
             params={"asset_cfg": BLOCK_CFG},
         ),
@@ -404,7 +406,7 @@ def openarm_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"sensor_name": "finger_block_contact", "asset_cfg": BLOCK_CFG},
         ),
         "block_fell": TerminationTermCfg(
-            func=lift_mdp.block_fell, params={"asset_cfg": BLOCK_CFG}
+            func=lift_mdp.object_fell, params={"asset_cfg": BLOCK_CFG}
         ),
     }
     cfg = ManagerBasedRlEnvCfg(

@@ -17,7 +17,7 @@
 import mujoco
 import numpy as np
 
-from openarm_mjlab.robot import (
+from openarm_mjlab.openarm_cell import (
     LEFT_GRASP_SITE,
     LEFT_JOINT4_HOME,
     OPENARM_CELL_XML,

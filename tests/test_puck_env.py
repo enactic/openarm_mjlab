@@ -79,10 +79,10 @@ def test_env_steps_with_finite_signals(env):
 def test_reset_puck_spawns_within_xy_range(env):
     """`reset_puck_uniform` must spawn every env within its declared jitter."""
     from openarm_mjlab.tasks.puck.puck_env_cfg import PUCK_CFG, PUCK_START
-    from openarm_mjlab.tasks.puck.mdp import puck_pos_w
+    from openarm_mjlab.common_mdp import object_pos_w
 
     env.reset()
-    pos = puck_pos_w(env, PUCK_CFG)
+    pos = object_pos_w(env, PUCK_CFG)
     start = torch.tensor(PUCK_START[:2])
     assert (pos[:, :2] - start).abs().max() <= 0.03 + 1e-6
 

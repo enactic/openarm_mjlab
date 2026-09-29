@@ -21,7 +21,7 @@ import pytest
 import openarm_mjlab.tasks  # noqa: F401
 from mjlab.scene import Scene
 from mjlab.tasks.registry import load_env_cfg
-from openarm_mjlab.robot_bimanual import GRASP_LOCAL_OFFSET
+from openarm_mjlab.openarm_bimanual import GRASP_LOCAL_OFFSET
 from openarm_mjlab.tasks.bimanual_lift import mdp
 
 

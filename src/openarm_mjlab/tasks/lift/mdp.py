@@ -28,15 +28,38 @@ from typing import TYPE_CHECKING
 import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
-from ...common_mdp import both_pads_on_block, pinch_obs
-from ...robot_bimanual import GRASP_LOCAL_OFFSET
+from ...common_mdp import (
+    both_pads_on_block,
+    descent_penalty,
+    env_buffer,
+    new_progress_rate,
+    object_fell,
+    object_pos_w,
+    object_speed,
+    partial_pinch_reward,
+    pinch_obs,
+    pinch_reward,
+    reach_object_reward,
+    reset_object_xy_uniform,
+    terminated_by,
+    tool_to_object_obs,
+)
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-__all__ = ["both_pads_on_block", "pinch_obs"]
+__all__ = [
+    "both_pads_on_block",
+    "descent_penalty",
+    "object_fell",
+    "partial_pinch_reward",
+    "pinch_obs",
+    "pinch_reward",
+    "reach_object_reward",
+    "terminated_by",
+    "tool_to_object_obs",
+]
 
 BLOCK_START = (0.30, -0.20, 0.43)
 TABLE_TOP_Z = 0.40
@@ -46,28 +69,9 @@ SETTLED_SPEED = 0.10  # m/s, block speed for "held".
 HEIGHT_TOLERANCE = 0.03  # m; success window is TARGET_LIFT..+30mm.
 
 
-def block_pos_w(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return the block's world position."""
-    block: Entity = env.scene[asset_cfg.name]
-    return block.data.root_link_pos_w
-
-
-def block_speed(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return the block's 3D speed."""
-    block: Entity = env.scene[asset_cfg.name]
-    return torch.linalg.norm(block.data.root_link_vel_w[:, :3], dim=-1)
-
-
-def pinch_reward(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
-    """Return a dense reward for holding a genuine bilateral pinch."""
-    return both_pads_on_block(env, sensor_name).float()
-
-
 def _pinch_streak(env) -> torch.Tensor:
     """Return the per-env count of consecutive steps holding a pinch."""
-    if not hasattr(env, "_lift_pinch_streak"):
-        env._lift_pinch_streak = torch.zeros(env.num_envs, device=env.device)
-    return env._lift_pinch_streak
+    return env_buffer(env, "_lift_pinch_streak")
 
 
 # ~0.5s (25 steps), roughly the time a real lift to TARGET_LIFT at
@@ -95,61 +99,14 @@ def pinch_streak_reward(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
     return torch.clamp(streak / PINCH_STREAK_CAP, 0.0, 1.0)
 
 
-def partial_pinch_reward(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
-    """Return a graded predecessor to the binary both-pads pinch.
-
-    0, 0.5, or 1.0 for how many of the two pads currently touch the
-    block. The binary AND in :func:`both_pads_on_block` is an all-or-
-    nothing gate with no signal for "one pad landed, still working on
-    the other"; this term is purely additive and does not touch
-    ``pinch_reward``/``both_pads_on_block``, so success and termination
-    semantics (which require the real two-pad pinch) are unchanged.
-    """
-    sensor = env.scene[sensor_name]
-    found = sensor.data.found
-    assert found is not None
-    per_pad = (found.view(env.num_envs, 2, -1).amax(dim=-1) > 0).float()
-    return per_pad.mean(dim=-1)
-
-
 def lift_height(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the block's height gained above its start, clamped to non-negative."""
-    return torch.clamp(block_pos_w(env, asset_cfg)[:, 2] - BLOCK_START[2], min=0.0)
-
-
-def tool_to_block_obs(
-    env: ManagerBasedRlEnv,
-    robot_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Return the vector from the finger-cage center to the block, base frame."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ee_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids].squeeze(1)
-    ee_quat_w = robot.data.site_quat_w[:, robot_cfg.site_ids].squeeze(1)
-    offset = torch.tensor(GRASP_LOCAL_OFFSET, device=ee_pos_w.device).expand_as(
-        ee_pos_w
-    )
-    tool_w = ee_pos_w + quat_apply(ee_quat_w, offset)
-    vec_w = block_pos_w(env, asset_cfg) - tool_w
-    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
-
-
-def reach_block_reward(
-    env: ManagerBasedRlEnv,
-    std: float,
-    robot_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Return a Gaussian-kernel reward on tool-to-block distance."""
-    d2 = torch.sum(torch.square(tool_to_block_obs(env, robot_cfg, asset_cfg)), dim=-1)
-    return torch.exp(-d2 / std**2)
+    return torch.clamp(object_pos_w(env, asset_cfg)[:, 2] - BLOCK_START[2], min=0.0)
 
 
 def _max_height(env) -> torch.Tensor:
     """Return the per-env running-max lift height reached this episode."""
-    if not hasattr(env, "_lift_max_height"):
-        env._lift_max_height = torch.zeros(env.num_envs, device=env.device)
-    return env._lift_max_height
+    return env_buffer(env, "_lift_max_height")
 
 
 def lift_rate_reward(
@@ -161,26 +118,18 @@ def lift_rate_reward(
 
     New-progress-only, so a plain rise-rate reward cannot be farmed by
     bouncing. Credited progress is capped at ``TARGET_LIFT``: the buffer
-    itself still tracks the TRUE max height (for ``block_fell`` and other
+    itself still tracks the TRUE max height (for ``object_fell`` and other
     bookkeeping), but the reward stops paying once the intended height is
     reached, removing any incentive to keep climbing past the target.
     """
-    h = lift_height(env, asset_cfg)
-    maxh = _max_height(env)
-    h_capped = torch.clamp(h, max=TARGET_LIFT)
-    maxh_capped = torch.clamp(maxh, max=TARGET_LIFT)
-    new = torch.clamp(h_capped - maxh_capped, min=0.0)
-    maxh.copy_(torch.maximum(maxh, h))
-    rate = torch.clamp(new / env.step_dt, 0.0, MAX_LIFT_RATE) / MAX_LIFT_RATE
+    rate = new_progress_rate(
+        env,
+        lift_height(env, asset_cfg),
+        _max_height(env),
+        MAX_LIFT_RATE,
+        cap=TARGET_LIFT,
+    )
     return rate * both_pads_on_block(env, sensor_name).float()
-
-
-def block_descent_penalty(
-    env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
-) -> torch.Tensor:
-    """Return an anti-pump penalty: lowering the block is never free."""
-    block: Entity = env.scene[asset_cfg.name]
-    return torch.clamp(-block.data.root_link_vel_w[:, 2], min=0.0)
 
 
 def held_high_reward(
@@ -198,11 +147,6 @@ def held_high_reward(
     return frac * both_pads_on_block(env, sensor_name).float()
 
 
-def lift_success_bonus(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Fire exactly once, on the ``lifted_target`` termination step."""
-    return env.termination_manager.get_term("lifted_target").float()
-
-
 def lifted_target(
     env: ManagerBasedRlEnv,
     sensor_name: str,
@@ -217,13 +161,8 @@ def lifted_target(
     """
     h = lift_height(env, asset_cfg)
     high = (h >= TARGET_LIFT) & (h <= TARGET_LIFT + HEIGHT_TOLERANCE)
-    slow = block_speed(env, asset_cfg) < SETTLED_SPEED
+    slow = object_speed(env, asset_cfg) < SETTLED_SPEED
     return high & slow & both_pads_on_block(env, sensor_name)
-
-
-def block_fell(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return early termination: the block fell off the table (top z=0.40)."""
-    return block_pos_w(env, asset_cfg)[:, 2] < 0.30
 
 
 def reset_block_uniform(
@@ -233,15 +172,7 @@ def reset_block_uniform(
     xy_range: float = 0.03,
 ) -> None:
     """Reset the block to its default pose plus xy jitter (raw coordinates)."""
-    block: Entity = env.scene[asset_cfg.name]
-    default = block.data.default_root_state
-    assert default is not None
-    state = default[env_ids].clone()
-    n = len(env_ids)
-    state[:, 0] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 1] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 7:] = 0.0
-    block.write_root_state_to_sim(state, env_ids=env_ids)
+    reset_object_xy_uniform(env, env_ids, asset_cfg, xy_range)
     # Reset the new-height buffer (written state has the block at rest on
     # the table: height gained = 0).
     _max_height(env)[env_ids] = 0.0
@@ -274,7 +205,7 @@ def reset_held_high(
     Arm at the IK hold pose, fingers pressed to block width, block at the
     tool point, +80mm above the table. The policy must clamp quickly or
     the block slips out: the held-high income stream it forfeits is the
-    real teacher, and ``block_fell`` never fires on a table-height drop.
+    real teacher, and ``object_fell`` never fires on a table-height drop.
     Runs after ``reset_block`` (overrides the subset it picks).
     """
     robot: Entity = env.scene[robot_joints_cfg.name]

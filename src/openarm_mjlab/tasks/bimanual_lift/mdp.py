@@ -77,11 +77,31 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv, quat_mul
 
-from ...robot_bimanual import GRASP_LOCAL_OFFSET
-from ...common_mdp import both_pads_on_block
+from ...common_mdp import (
+    both_pads_on_block,
+    descent_penalty,
+    env_buffer,
+    new_progress_rate,
+    object_pos_w,
+    object_speed,
+    partial_pinch_reward,
+    pinch_obs,
+    pinch_reward,
+    reset_object_xy_uniform,
+    terminated_by,
+    tool_to_point,
+)
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
+
+__all__ = [
+    "descent_penalty",
+    "partial_pinch_reward",
+    "pinch_obs",
+    "pinch_reward",
+    "terminated_by",
+]
 
 # Table/height convention matches lift's TABLE_TOP_Z/BLOCK_START exactly
 # (same table entity, reused unmodified -- see get_lift_table_spec import
@@ -162,18 +182,6 @@ RIGHT_FINGER_SQUEEZE = -0.265
 LEFT_FINGER_SQUEEZE = 0.265
 
 
-def bar_pos_w(env, asset_cfg) -> torch.Tensor:
-    """Return the bar's world position."""
-    bar: Entity = env.scene[asset_cfg.name]
-    return bar.data.root_link_pos_w
-
-
-def bar_speed(env, asset_cfg) -> torch.Tensor:
-    """Return the bar's linear speed."""
-    bar: Entity = env.scene[asset_cfg.name]
-    return torch.linalg.norm(bar.data.root_link_vel_w[:, :3], dim=-1)
-
-
 def bar_end_pos_w(env, asset_cfg, local_offset) -> torch.Tensor:
     """Return the world position of one bar end.
 
@@ -198,22 +206,9 @@ def end_height(env, asset_cfg, local_offset) -> torch.Tensor:
     return torch.clamp(z - BAR_START[2], min=0.0)
 
 
-def tool_pos_w(env, robot_cfg) -> torch.Tensor:
-    """Return the gripper tool point in world coordinates."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ee_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids].squeeze(1)
-    ee_quat_w = robot.data.site_quat_w[:, robot_cfg.site_ids].squeeze(1)
-    offset = torch.tensor(GRASP_LOCAL_OFFSET, device=ee_pos_w.device).expand_as(
-        ee_pos_w
-    )
-    return ee_pos_w + quat_apply(ee_quat_w, offset)
-
-
 def tool_to_end_obs(env, robot_cfg, asset_cfg, local_offset) -> torch.Tensor:
     """Return the tool-to-bar-end vector observation."""
-    robot: Entity = env.scene[robot_cfg.name]
-    vec_w = bar_end_pos_w(env, asset_cfg, local_offset) - tool_pos_w(env, robot_cfg)
-    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
+    return tool_to_point(env, robot_cfg, bar_end_pos_w(env, asset_cfg, local_offset))
 
 
 def reach_bar_end_reward(
@@ -230,31 +225,6 @@ def reach_bar_end_reward(
     return torch.exp(-d2 / std**2)
 
 
-def pinch_reward(env, sensor_name: str) -> torch.Tensor:
-    """Return 1.0 where both finger pads touch the bar end."""
-    return both_pads_on_block(env, sensor_name).float()
-
-
-def partial_pinch_reward(env, sensor_name: str) -> torch.Tensor:
-    """Return 0, 0.5 or 1.0 for how many of the two pads are touching.
-
-    A graded predecessor to the binary two-pad gate: the binary AND gives no
-    signal for "one pad landed, still working on the other", a gradient
-    desert that stalls discovery of the squeeze. Purely additive -- success
-    and termination still require a genuine two-pad pinch.
-    """
-    sensor = env.scene[sensor_name]
-    found = sensor.data.found
-    assert found is not None
-    per_pad = (found.view(env.num_envs, 2, -1).amax(dim=-1) > 0).float()
-    return per_pad.mean(dim=-1)
-
-
-def pinch_obs(env, sensor_name: str) -> torch.Tensor:
-    """Return the observation wrapper for the two-pad pinch gate."""
-    return both_pads_on_block(env, sensor_name).float().unsqueeze(-1)
-
-
 def both_ends_gripped(env, sensor_right: str, sensor_left: str) -> torch.Tensor:
     """Return True where both grippers hold their own bar end.
 
@@ -268,12 +238,10 @@ def both_ends_gripped(env, sensor_right: str, sensor_left: str) -> torch.Tensor:
 
 
 def _streak_buffers(env) -> dict[str, torch.Tensor]:
-    if not hasattr(env, "_bimanual_lift_streaks"):
-        env._bimanual_lift_streaks = {
-            "right": torch.zeros(env.num_envs, device=env.device),
-            "left": torch.zeros(env.num_envs, device=env.device),
-        }
-    return env._bimanual_lift_streaks
+    return {
+        side: env_buffer(env, f"_bimanual_lift_streak_{side}")
+        for side in ("right", "left")
+    }
 
 
 # 2026-08-26 grasp-geometry fix. Measured root cause of the never-lifts
@@ -430,9 +398,7 @@ def together_pinch_streak_reward(
 
 
 def _max_together_height(env) -> torch.Tensor:
-    if not hasattr(env, "_bimanual_lift_max_h"):
-        env._bimanual_lift_max_h = torch.zeros(env.num_envs, device=env.device)
-    return env._bimanual_lift_max_h
+    return env_buffer(env, "_bimanual_lift_max_h")
 
 
 def together_lift_rate_reward(
@@ -459,21 +425,15 @@ def together_lift_rate_reward(
     h_r = end_height(env, asset_cfg, RIGHT_END_OFFSET)
     h_l = end_height(env, asset_cfg, LEFT_END_OFFSET)
     h_together = torch.minimum(h_r, h_l)
-    maxh = _max_together_height(env)
-    h_capped = torch.clamp(h_together, max=TARGET_LIFT)
-    maxh_capped = torch.clamp(maxh, max=TARGET_LIFT)
-    new = torch.clamp(h_capped - maxh_capped, min=0.0)
-    maxh.copy_(torch.maximum(maxh, h_together))
-    rate = torch.clamp(new / env.step_dt, 0.0, MAX_LIFT_RATE) / MAX_LIFT_RATE
+    rate = new_progress_rate(
+        env, h_together, _max_together_height(env), MAX_LIFT_RATE, cap=TARGET_LIFT
+    )
     gate = both_ends_gripped(env, sensor_right, sensor_left).float()
     return rate * gate
 
 
 def _max_individual_height(env, side: str) -> torch.Tensor:
-    attr = f"_bimanual_lift_max_h_{side}"
-    if not hasattr(env, attr):
-        setattr(env, attr, torch.zeros(env.num_envs, device=env.device))
-    return getattr(env, attr)
+    return env_buffer(env, f"_bimanual_lift_max_h_{side}")
 
 
 def individual_lift_rate_reward(
@@ -506,12 +466,9 @@ def individual_lift_rate_reward(
     requirement -- genuine success still requires together_* to fire.
     """
     h = end_height(env, asset_cfg, local_offset)
-    maxh = _max_individual_height(env, side)
-    h_capped = torch.clamp(h, max=TARGET_LIFT)
-    maxh_capped = torch.clamp(maxh, max=TARGET_LIFT)
-    new = torch.clamp(h_capped - maxh_capped, min=0.0)
-    maxh.copy_(torch.maximum(maxh, h))
-    rate = torch.clamp(new / env.step_dt, 0.0, MAX_LIFT_RATE) / MAX_LIFT_RATE
+    rate = new_progress_rate(
+        env, h, _max_individual_height(env, side), MAX_LIFT_RATE, cap=TARGET_LIFT
+    )
     gate = both_pads_on_block(env, sensor_name).float()
     return rate * gate
 
@@ -578,17 +535,6 @@ def level_reward(
     return kernel * frac * both_ends_gripped(env, sensor_right, sensor_left).float()
 
 
-def bar_descent_penalty(env, asset_cfg) -> torch.Tensor:
-    """Return a penalty for lowering the bar.
-
-    Anti-pump, matching lift's block_descent_penalty exactly: lowering
-
-    the bar is never free.
-    """
-    bar: Entity = env.scene[asset_cfg.name]
-    return torch.clamp(-bar.data.root_link_vel_w[:, 2], min=0.0)
-
-
 def together_overshoot_penalty(env, asset_cfg) -> torch.Tensor:
     r"""Return a penalty for raising the bar past the target window.
 
@@ -602,11 +548,6 @@ def together_overshoot_penalty(env, asset_cfg) -> torch.Tensor:
     h_l = end_height(env, asset_cfg, LEFT_END_OFFSET)
     h_together = torch.minimum(h_r, h_l)
     return torch.clamp(h_together - (TARGET_LIFT + HEIGHT_TOLERANCE), min=0.0)
-
-
-def together_success_bonus(env) -> torch.Tensor:
-    """Fire once on the successful-lift termination step."""
-    return env.termination_manager.get_term("lifted_together").float()
 
 
 def lifted_together(
@@ -629,7 +570,7 @@ def lifted_together(
     in_window_r = (h_r >= TARGET_LIFT) & (h_r <= TARGET_LIFT + HEIGHT_TOLERANCE)
     in_window_l = (h_l >= TARGET_LIFT) & (h_l <= TARGET_LIFT + HEIGHT_TOLERANCE)
     level = (h_r - h_l).abs() < LEVEL_TOLERANCE
-    slow = bar_speed(env, asset_cfg) < SETTLED_SPEED
+    slow = object_speed(env, asset_cfg) < SETTLED_SPEED
     gripped = both_ends_gripped(env, sensor_right, sensor_left)
     return in_window_r & in_window_l & level & slow & gripped
 
@@ -639,12 +580,12 @@ def bar_fell(env, asset_cfg) -> torch.Tensor:
 
     Fell if the bar's center OR either end drops below the floor
 
-    threshold (lift's block_fell used a single point since its block has
+    threshold (lift's object_fell used a single point since its block has
     no meaningful extent; the bar can tip, so checking only the center
     could miss an end that slid off the table edge while the center
     stayed higher).
     """
-    center_z = bar_pos_w(env, asset_cfg)[:, 2]
+    center_z = object_pos_w(env, asset_cfg)[:, 2]
     right_z = bar_end_pos_w(env, asset_cfg, RIGHT_END_OFFSET)[:, 2]
     left_z = bar_end_pos_w(env, asset_cfg, LEFT_END_OFFSET)[:, 2]
     lowest = torch.minimum(torch.minimum(center_z, right_z), left_z)
@@ -664,15 +605,7 @@ def reset_bar_uniform(
     collision zone the env cfg docstring documents avoiding (a few mm of
     jitter is not the same regime as reaching toward y=0).
     """
-    bar: Entity = env.scene[asset_cfg.name]
-    default = bar.data.default_root_state
-    assert default is not None
-    state = default[env_ids].clone()
-    n = len(env_ids)
-    state[:, 0] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 1] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 7:] = 0.0
-    bar.write_root_state_to_sim(state, env_ids=env_ids)
+    reset_object_xy_uniform(env, env_ids, asset_cfg, xy_range)
     _max_together_height(env)[env_ids] = 0.0
     _max_individual_height(env, "right")[env_ids] = 0.0
     _max_individual_height(env, "left")[env_ids] = 0.0

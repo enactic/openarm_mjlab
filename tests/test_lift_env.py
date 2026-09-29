@@ -68,7 +68,8 @@ def test_env_steps_with_finite_signals(env):
 def test_reset_held_high_places_block_at_the_hold_height():
     """With probability=1.0, every env must spawn already holding the block."""
     from openarm_mjlab.tasks.lift.lift_env_cfg import BLOCK_CFG, openarm_lift_env_cfg
-    from openarm_mjlab.tasks.lift.mdp import HELD_HIGH_TOOL_Z, block_pos_w
+    from openarm_mjlab.common_mdp import object_pos_w
+    from openarm_mjlab.tasks.lift.mdp import HELD_HIGH_TOOL_Z
 
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -78,7 +79,7 @@ def test_reset_held_high_places_block_at_the_hold_height():
     env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
     try:
         env.reset()
-        pos = block_pos_w(env, BLOCK_CFG)
+        pos = object_pos_w(env, BLOCK_CFG)
         assert torch.allclose(pos[:, 2], torch.tensor(HELD_HIGH_TOOL_Z), atol=1e-3)
     finally:
         env.close()

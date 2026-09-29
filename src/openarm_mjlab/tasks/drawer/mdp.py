@@ -25,6 +25,11 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply
 
 from ...common_mdp import (
+    env_buffer,
+    fixture_joint_pos,
+    fixture_joint_vel,
+    new_progress_rate,
+    potential_shaping,
     contact_reward,
     ee_to_target,
     fingers_on_handle,
@@ -52,21 +57,17 @@ DRAWER_TRAVEL = 0.10
 
 def drawer_opening(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the drawer opening in meters, shape ``(num_envs,)``."""
-    cabinet: Entity = env.scene[asset_cfg.name]
-    return -cabinet.data.joint_pos[:, asset_cfg.joint_ids].squeeze(-1)
+    return -fixture_joint_pos(env, asset_cfg)
 
 
 def drawer_speed(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the absolute slide velocity in m/s, shape ``(num_envs,)``."""
-    cabinet: Entity = env.scene[asset_cfg.name]
-    return cabinet.data.joint_vel[:, asset_cfg.joint_ids].squeeze(-1).abs()
+    return fixture_joint_vel(env, asset_cfg).abs()
 
 
 def _engaged(env) -> torch.Tensor:
     """Return whether this episode's engagement depth has been frozen yet."""
-    if not hasattr(env, "_drawer_engaged"):
-        env._drawer_engaged = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_engaged
+    return env_buffer(env, "_drawer_engaged")
 
 
 def _engage_frac(env) -> torch.Tensor:
@@ -79,9 +80,7 @@ def _engage_frac(env) -> torch.Tensor:
     reward value while still removing the growing per-step opportunity
     cost of pulling deep early vs. late in an episode.
     """
-    if not hasattr(env, "_drawer_engage_frac"):
-        env._drawer_engage_frac = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_engage_frac
+    return env_buffer(env, "_drawer_engage_frac")
 
 
 def handle_contact_reward(
@@ -101,30 +100,27 @@ def handle_contact_reward(
 
 def _start_opening(env) -> torch.Tensor:
     """Return the per-env drawer opening recorded at episode start."""
-    if not hasattr(env, "_drawer_start_opening"):
-        env._drawer_start_opening = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_start_opening
+    return env_buffer(env, "_drawer_start_opening")
 
 
 def _max_opening(env) -> torch.Tensor:
     """Return the per-env running-max opening reached this episode."""
-    if not hasattr(env, "_drawer_max_opening"):
-        env._drawer_max_opening = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_max_opening
+    return env_buffer(env, "_drawer_max_opening")
 
 
 def _prev_progress(env) -> torch.Tensor:
     """Return the previous step's clamped progress fraction, for shaping."""
-    if not hasattr(env, "_drawer_prev_progress"):
-        env._drawer_prev_progress = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_prev_progress
+    return env_buffer(env, "_drawer_prev_progress")
+
+
+def _gained_contact(env) -> torch.Tensor:
+    """Return opening accumulated only while fingers touch the handle."""
+    return env_buffer(env, "_drawer_gained_contact")
 
 
 def _peak_speed(env) -> torch.Tensor:
     """Return the per-env peak drawer speed reached so far this episode."""
-    if not hasattr(env, "_drawer_peak_speed"):
-        env._drawer_peak_speed = torch.zeros(env.num_envs, device=env.device)
-    return env._drawer_peak_speed
+    return env_buffer(env, "_drawer_peak_speed")
 
 
 def record_drawer_start(
@@ -138,14 +134,11 @@ def record_drawer_start(
     opening the policy PRODUCED: with a randomized initial opening,
     absolute-opening rewards would otherwise pay free income at spawn.
     """
-    cabinet: Entity = env.scene[asset_cfg.name]
-    op = -cabinet.data.joint_pos[:, asset_cfg.joint_ids].squeeze(-1)
+    op = drawer_opening(env, asset_cfg)
     _start_opening(env)[env_ids] = op[env_ids]
     _max_opening(env)[env_ids] = op[env_ids]
     _prev_progress(env)[env_ids] = 0.0
-    if not hasattr(env, "_drawer_gained_contact"):
-        env._drawer_gained_contact = torch.zeros(env.num_envs, device=env.device)
-    env._drawer_gained_contact[env_ids] = 0.0
+    _gained_contact(env)[env_ids] = 0.0
     _peak_speed(env)[env_ids] = 0.0
     _engaged(env)[env_ids] = 0.0
     _engage_frac(env)[env_ids] = 0.0
@@ -178,19 +171,14 @@ def open_progress_shaping_reward(
     """
     gate = fingers_on_handle(env, sensor_name).float()
     cur = open_gained_progress(env, asset_cfg)
-    prev = _prev_progress(env)
-    shaping = gamma * cur - prev
-    prev.copy_(cur)
-    return shaping * gate
+    return potential_shaping(cur, _prev_progress(env), gamma) * gate
 
 
 def closing_speed_penalty(
     env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
 ) -> torch.Tensor:
     """Return an anti-pump penalty: closing the drawer is never free."""
-    cabinet: Entity = env.scene[asset_cfg.name]
-    closing_rate = cabinet.data.joint_vel[:, asset_cfg.joint_ids].squeeze(-1)
-    return torch.clamp(closing_rate, min=0.0)
+    return torch.clamp(fixture_joint_vel(env, asset_cfg), min=0.0)
 
 
 def drawer_speed_penalty(
@@ -217,14 +205,9 @@ def pull_rate_reward(
     """
     h = drawer_opening(env, asset_cfg)
     maxh = _max_opening(env)
-    new = torch.clamp(h - maxh, min=0.0)
-    maxh.copy_(torch.maximum(maxh, h))
-    capped = torch.clamp(new / env.step_dt, 0.0, max_speed) / max_speed
     contact = fingers_on_handle(env, sensor_name).float()
-    if not hasattr(env, "_drawer_gained_contact"):
-        env._drawer_gained_contact = torch.zeros(env.num_envs, device=env.device)
-    env._drawer_gained_contact.add_(new * contact)
-    return capped * contact
+    _gained_contact(env).add_(torch.clamp(h - maxh, min=0.0) * contact)
+    return new_progress_rate(env, h, maxh, max_speed) * contact
 
 
 def approach_precision_reward(
@@ -309,9 +292,7 @@ def drawer_held_fully_open(
     slow = (drawer_speed(env, asset_cfg) < max_speed) & (peak < peak_speed)
     contact = fingers_on_handle(env, sensor_name)
     gained = drawer_opening(env, asset_cfg) - _start_opening(env)
-    if not hasattr(env, "_drawer_gained_contact"):
-        env._drawer_gained_contact = torch.zeros(env.num_envs, device=env.device)
-    honest = env._drawer_gained_contact >= 0.85 * torch.clamp(gained, min=1e-6)
+    honest = _gained_contact(env) >= 0.85 * torch.clamp(gained, min=1e-6)
     return opening_ok & slow & contact & honest
 
 

@@ -24,10 +24,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from ...common_mdp import (
+    env_buffer,
+    fixture_joint_pos,
+    fixture_joint_vel,
+    new_progress_rate,
     contact_reward,
     ee_to_target,
     fingers_on_handle,
@@ -55,42 +58,36 @@ MAX_SWING_RATE = 1.0  # rad/s
 
 def door_angle(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the door hinge angle, radians."""
-    door: Entity = env.scene[asset_cfg.name]
-    return door.data.joint_pos[:, asset_cfg.joint_ids].squeeze(-1)
+    return fixture_joint_pos(env, asset_cfg)
 
 
 def door_rate(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the door hinge angular velocity, rad/s."""
-    door: Entity = env.scene[asset_cfg.name]
-    return door.data.joint_vel[:, asset_cfg.joint_ids].squeeze(-1)
+    return fixture_joint_vel(env, asset_cfg)
 
 
 def _start_angle(env) -> torch.Tensor:
     """Return the per-env angle recorded at episode start."""
-    if not hasattr(env, "_door_start_angle"):
-        env._door_start_angle = torch.zeros(env.num_envs, device=env.device)
-    return env._door_start_angle
+    return env_buffer(env, "_door_start_angle")
 
 
 def _gained_contact(env) -> torch.Tensor:
     """Return swing accumulated only while fingers touch the handle."""
-    if not hasattr(env, "_door_gained_contact"):
-        env._door_gained_contact = torch.zeros(env.num_envs, device=env.device)
-    return env._door_gained_contact
+    return env_buffer(env, "_door_gained_contact")
 
 
 def _prev_angle(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the previous step's door angle, for rate bookkeeping."""
-    if not hasattr(env, "_door_prev_angle"):
-        env._door_prev_angle = door_angle(env, asset_cfg).clone()
-    return env._door_prev_angle
+    return env_buffer(
+        env, "_door_prev_angle", lambda: door_angle(env, asset_cfg).clone()
+    )
 
 
 def _max_angle(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the per-env running-max angle reached this episode."""
-    if not hasattr(env, "_door_max_angle"):
-        env._door_max_angle = door_angle(env, asset_cfg).clone()
-    return env._door_max_angle
+    return env_buffer(
+        env, "_door_max_angle", lambda: door_angle(env, asset_cfg).clone()
+    )
 
 
 def record_door_start(
@@ -126,11 +123,8 @@ def swing_rate_reward(
     prev = _prev_angle(env, asset_cfg)
     _gained_contact(env).add_(torch.clamp(a - prev, min=0.0) * contact)
     prev.copy_(a)
-    maxa = _max_angle(env, asset_cfg)
-    new = torch.clamp(a - maxa, min=0.0)
-    maxa.copy_(torch.maximum(maxa, a))
-    capped = torch.clamp(new / env.step_dt, 0.0, MAX_SWING_RATE) / MAX_SWING_RATE
-    return capped * contact
+    rate = new_progress_rate(env, a, _max_angle(env, asset_cfg), MAX_SWING_RATE)
+    return rate * contact
 
 
 def uncontrolled_motion_penalty(

@@ -36,7 +36,7 @@ from mjlab.tasks.manipulation import mdp as manipulation_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
-from ...robot import (
+from ...openarm_cell import (
     LEFT_FINGER_HOME,
     LEFT_FINGERTIP_GEOMS,
     LEFT_GRASP_SITE,

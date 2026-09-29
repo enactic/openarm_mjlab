@@ -25,10 +25,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from ...common_mdp import (
+    env_buffer,
+    fixture_joint_pos,
+    fixture_joint_vel,
+    new_progress_rate,
+    potential_shaping,
     contact_reward,
     ee_to_target,
     fingers_on_handle,
@@ -54,42 +58,34 @@ MAX_TURN_RATE = 1.0  # rad/s
 
 def valve_angle(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the valve hinge angle, radians."""
-    valve: Entity = env.scene[asset_cfg.name]
-    return valve.data.joint_pos[:, asset_cfg.joint_ids].squeeze(-1)
+    return fixture_joint_pos(env, asset_cfg)
 
 
 def valve_rate(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the valve hinge angular velocity, rad/s."""
-    valve: Entity = env.scene[asset_cfg.name]
-    return valve.data.joint_vel[:, asset_cfg.joint_ids].squeeze(-1)
+    return fixture_joint_vel(env, asset_cfg)
 
 
 def _start_angle(env) -> torch.Tensor:
     """Return the per-env angle recorded at episode start."""
-    if not hasattr(env, "_valve_start_angle"):
-        env._valve_start_angle = torch.zeros(env.num_envs, device=env.device)
-    return env._valve_start_angle
+    return env_buffer(env, "_valve_start_angle")
 
 
 def _gained_contact(env) -> torch.Tensor:
     """Return rotation accumulated only while fingers touch the grip."""
-    if not hasattr(env, "_valve_gained_contact"):
-        env._valve_gained_contact = torch.zeros(env.num_envs, device=env.device)
-    return env._valve_gained_contact
+    return env_buffer(env, "_valve_gained_contact")
 
 
 def _max_angle(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the per-env running-max angle reached this episode."""
-    if not hasattr(env, "_valve_max_angle"):
-        env._valve_max_angle = valve_angle(env, asset_cfg).clone()
-    return env._valve_max_angle
+    return env_buffer(
+        env, "_valve_max_angle", lambda: valve_angle(env, asset_cfg).clone()
+    )
 
 
 def _prev_progress(env) -> torch.Tensor:
     """Return the previous step's clamped progress fraction, for shaping."""
-    if not hasattr(env, "_valve_prev_progress"):
-        env._valve_prev_progress = torch.zeros(env.num_envs, device=env.device)
-    return env._valve_prev_progress
+    return env_buffer(env, "_valve_prev_progress")
 
 
 def record_valve_start(
@@ -125,14 +121,9 @@ def turn_rate_reward(
     contact = fingers_on_handle(env, sensor_name).float()
     a = valve_angle(env, asset_cfg)
     maxa = _max_angle(env, asset_cfg)
-    a_capped = torch.clamp(a, max=TARGET_TURN)
-    maxa_capped = torch.clamp(maxa, max=TARGET_TURN)
-    new = torch.clamp(a_capped - maxa_capped, min=0.0)
-    new_uncapped = torch.clamp(a - maxa, min=0.0)
-    _gained_contact(env).add_(new_uncapped * contact)
-    maxa.copy_(torch.maximum(maxa, a))
-    capped = torch.clamp(new / env.step_dt, 0.0, MAX_TURN_RATE) / MAX_TURN_RATE
-    return capped * contact
+    _gained_contact(env).add_(torch.clamp(a - maxa, min=0.0) * contact)
+    rate = new_progress_rate(env, a, maxa, MAX_TURN_RATE, cap=TARGET_TURN)
+    return rate * contact
 
 
 def turn_progress_shaping_reward(
@@ -141,18 +132,13 @@ def turn_progress_shaping_reward(
     asset_cfg: SceneEntityCfg,
     gamma: float = 0.99,
 ) -> torch.Tensor:
-    """Return potential-based shaping (Ng, Harada & Russell 1999) on gained-turn fraction.
+    """Return potential-based shaping on the gained-turn fraction.
 
-    ``reward = gamma * Phi(s') - Phi(s)``. Camping-negative by construction: a
-    fixed state pays ``(gamma - 1) * Phi < 0`` every step instead of paying
-    nothing-or-positive, so holding still under contact is never free.
+    See :func:`potential_shaping`: holding still under contact is never free.
     """
     gate = fingers_on_handle(env, sensor_name).float()
     cur = torch.clamp(turn_gained(env, asset_cfg) / TARGET_TURN, 0.0, 1.0)
-    prev = _prev_progress(env)
-    shaping = gamma * cur - prev
-    prev.copy_(cur)
-    return shaping * gate
+    return potential_shaping(cur, _prev_progress(env), gamma) * gate
 
 
 def reverse_rate_penalty(

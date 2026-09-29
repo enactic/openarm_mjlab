@@ -39,7 +39,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ...actions import HoldDefaultPositionActionCfg
-from ...robot_bimanual import (
+from ...openarm_bimanual import (
     BIMANUAL_ACTION_SCALE,
     EE_SITE_RIGHT,
     get_bimanual_robot_cfg,

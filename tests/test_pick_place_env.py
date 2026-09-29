@@ -76,7 +76,7 @@ def test_gripper_action_reaches_the_closed_jaw(env):
     band. Regression test for openarm-mujoco 2.3.0, which moved home from the
     closed jaw to the open one and left the old scale unable to reach a grasp.
     """
-    from openarm_mjlab.robot import LEFT_FINGER_HOME
+    from openarm_mjlab.openarm_cell import LEFT_FINGER_HOME
 
     term = env.action_manager.get_term("joint_pos")
     i = term.target_names.index("openarm_left_finger_joint1")

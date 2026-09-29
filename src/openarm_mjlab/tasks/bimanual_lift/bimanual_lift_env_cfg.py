@@ -102,7 +102,7 @@ from mjlab.actuator import BuiltinPositionActuatorCfg, IdealPdActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg
 from mjlab.envs.mdp.actions import JointEffortActionCfg
 
-from ...robot_bimanual import (
+from ...openarm_bimanual import (
     BIMANUAL_ACTION_SCALE,
     EE_SITE_LEFT,
     EE_SITE_RIGHT,
@@ -725,10 +725,12 @@ def openarm_bimanual_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # an earlier attempt's 1.42x (which destabilized training), since this is now
         # the only empirical data point available for what ratio is safe.
         "success": RewardTermCfg(
-            func=bl_mdp.together_success_bonus, weight=3660.0, params={}
+            func=bl_mdp.terminated_by,
+            weight=3660.0,
+            params={"term_name": "lifted_together"},
         ),
         "descent": RewardTermCfg(
-            func=bl_mdp.bar_descent_penalty,
+            func=bl_mdp.descent_penalty,
             weight=-2.0,
             params={"asset_cfg": BAR_CFG},
         ),

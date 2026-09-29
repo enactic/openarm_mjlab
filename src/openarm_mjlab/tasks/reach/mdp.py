@@ -22,10 +22,8 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
-from ...common_mdp import terminated_by
-from ...robot_bimanual import GRASP_LOCAL_OFFSET
+from ...common_mdp import env_buffer, terminated_by, tool_pos_w, tool_to_point
 
 
 if TYPE_CHECKING:
@@ -41,35 +39,21 @@ SUCCESS_DIST = 0.02
 SETTLED_QVEL = 0.3  # rad/s max arm joint speed counted as "held".
 
 
+def _sample_targets(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
+    """Return ``n`` targets drawn uniformly from the workspace box."""
+    lo = torch.tensor(TARGET_LO, device=env.device)
+    hi = torch.tensor(TARGET_HI, device=env.device)
+    return lo + (hi - lo) * torch.rand(n, 3, device=env.device)
+
+
 def _targets(env: ManagerBasedRlEnv) -> torch.Tensor:
     """Lazily allocate and return the per-env target buffer."""
-    if not hasattr(env, "_reach_targets"):
-        lo = torch.tensor(TARGET_LO, device=env.device)
-        hi = torch.tensor(TARGET_HI, device=env.device)
-        env._reach_targets = lo + (hi - lo) * torch.rand(
-            env.num_envs, 3, device=env.device
-        )
-    return env._reach_targets
+    return env_buffer(env, "_reach_targets", lambda: _sample_targets(env, env.num_envs))
 
 
 def resample_targets(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
     """Reset event: draw a fresh random target for the given envs."""
-    lo = torch.tensor(TARGET_LO, device=env.device)
-    hi = torch.tensor(TARGET_HI, device=env.device)
-    _targets(env)[env_ids] = lo + (hi - lo) * torch.rand(
-        len(env_ids), 3, device=env.device
-    )
-
-
-def tool_pos_w(env: ManagerBasedRlEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
-    """World-frame position of the grasp/tool point (see GRASP_LOCAL_OFFSET)."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ee_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids].squeeze(1)
-    ee_quat_w = robot.data.site_quat_w[:, robot_cfg.site_ids].squeeze(1)
-    offset = torch.tensor(GRASP_LOCAL_OFFSET, device=ee_pos_w.device).expand_as(
-        ee_pos_w
-    )
-    return ee_pos_w + quat_apply(ee_quat_w, offset)
+    _targets(env)[env_ids] = _sample_targets(env, len(env_ids))
 
 
 def target_dist(env: ManagerBasedRlEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -81,9 +65,7 @@ def tool_to_target_obs(
     env: ManagerBasedRlEnv, robot_cfg: SceneEntityCfg
 ) -> torch.Tensor:
     """Target-minus-tool vector, in the robot's own base frame."""
-    robot: Entity = env.scene[robot_cfg.name]
-    vec_w = _targets(env) - tool_pos_w(env, robot_cfg)
-    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
+    return tool_to_point(env, robot_cfg, _targets(env))
 
 
 def reach_reward(

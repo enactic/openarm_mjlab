@@ -28,14 +28,19 @@ from typing import TYPE_CHECKING
 import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 from ...common_mdp import (
+    env_buffer,
     fingers_on_handle,
     fingers_on_handle_obs,
+    object_fell,
+    object_pos_w,
+    reach_object_reward,
+    reset_object_xy_uniform,
     terminated_by,
+    to_base_frame,
+    tool_to_object_obs,
 )
-from ...robot_bimanual import GRASP_LOCAL_OFFSET
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -43,7 +48,10 @@ if TYPE_CHECKING:
 __all__ = [
     "fingers_on_handle",
     "fingers_on_handle_obs",
+    "object_fell",
+    "reach_object_reward",
     "terminated_by",
+    "tool_to_object_obs",
 ]
 
 # Goal disc, local to the env origin.
@@ -60,12 +68,6 @@ def _goal_w(env) -> torch.Tensor:
     return goal.expand(env.num_envs, 3)
 
 
-def puck_pos_w(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return the puck's world position."""
-    puck: Entity = env.scene[asset_cfg.name]
-    return puck.data.root_link_pos_w
-
-
 def puck_speed(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the puck's planar speed."""
     puck: Entity = env.scene[asset_cfg.name]
@@ -74,7 +76,7 @@ def puck_speed(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tenso
 
 def puck_goal_dist(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Return the planar distance from the puck to the goal center."""
-    d = puck_pos_w(env, asset_cfg)[:, :2] - _goal_w(env)[:, :2]
+    d = object_pos_w(env, asset_cfg)[:, :2] - _goal_w(env)[:, :2]
     return torch.linalg.norm(d, dim=-1)
 
 
@@ -84,37 +86,8 @@ def puck_to_goal_obs(
     robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Return the vector from the puck to the goal, base frame."""
-    robot: Entity = env.scene[robot_cfg.name]
-    vec_w = _goal_w(env) - puck_pos_w(env, asset_cfg)
-    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
-
-
-def tool_to_puck_obs(
-    env: ManagerBasedRlEnv,
-    robot_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Return the vector from the finger-cage center to the puck, base frame."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ee_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids].squeeze(1)
-    ee_quat_w = robot.data.site_quat_w[:, robot_cfg.site_ids].squeeze(1)
-    offset = torch.tensor(GRASP_LOCAL_OFFSET, device=ee_pos_w.device).expand_as(
-        ee_pos_w
-    )
-    tool_w = ee_pos_w + quat_apply(ee_quat_w, offset)
-    vec_w = puck_pos_w(env, asset_cfg) - tool_w
-    return quat_apply(quat_inv(robot.data.root_link_quat_w), vec_w)
-
-
-def reach_puck_reward(
-    env: ManagerBasedRlEnv,
-    std: float,
-    robot_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Return a Gaussian-kernel reward on tool-to-puck distance."""
-    d2 = torch.sum(torch.square(tool_to_puck_obs(env, robot_cfg, asset_cfg)), dim=-1)
-    return torch.exp(-d2 / std**2)
+    vec_w = _goal_w(env) - object_pos_w(env, asset_cfg)
+    return to_base_frame(env, robot_cfg, vec_w)
 
 
 def push_rate_reward(
@@ -129,10 +102,9 @@ def push_rate_reward(
     episode's best distance so push-pull cycling cannot farm income.
     """
     dist = puck_goal_dist(env, asset_cfg)
-    if not hasattr(env, "_puck_min_dist"):
-        env._puck_min_dist = dist.clone()
-    new = torch.clamp(env._puck_min_dist - dist, min=0.0)
-    env._puck_min_dist.copy_(torch.minimum(env._puck_min_dist, dist))
+    min_dist = env_buffer(env, "_puck_min_dist", dist.clone)
+    new = torch.clamp(min_dist - dist, min=0.0)
+    min_dist.copy_(torch.minimum(min_dist, dist))
     capped = torch.clamp(new / env.step_dt, 0.0, MAX_PUSH_SPEED) / MAX_PUSH_SPEED
     return capped * fingers_on_handle(env, sensor_name).float()
 
@@ -173,36 +145,18 @@ def puck_at_goal(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Ten
     return close & slow
 
 
-def puck_fell(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return early termination: the puck was knocked off the table (top z=0.40)."""
-    return puck_pos_w(env, asset_cfg)[:, 2] < 0.30
-
-
 def reset_puck_uniform(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg,
     xy_range: float = 0.03,
 ) -> None:
-    """Reset the puck to its default pose plus xy jitter.
-
-    Free-body resets must start from the default state (which already
-    contains the env origin for attached free bodies) and add jitter on
-    top, rather than adding origins a second time.
-    """
-    puck: Entity = env.scene[asset_cfg.name]
-    default = puck.data.default_root_state
-    assert default is not None
-    state = default[env_ids].clone()
-    n = len(env_ids)
-    state[:, 0] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 1] += (torch.rand(n, device=env.device) * 2 - 1) * xy_range
-    state[:, 7:] = 0.0
-    puck.write_root_state_to_sim(state, env_ids=env_ids)
+    """Reset the puck to its default pose plus xy jitter."""
+    state = reset_object_xy_uniform(env, env_ids, asset_cfg, xy_range)
     # Seed the rate buffer from the WRITTEN positions: derived kinematics
     # are stale inside reset events.
     goal = torch.tensor(GOAL_LOCAL, device=env.device)
     d = torch.linalg.norm(state[:, :2] - goal[:2], dim=-1)
-    if not hasattr(env, "_puck_min_dist"):
-        env._puck_min_dist = puck_goal_dist(env, asset_cfg).clone()
-    env._puck_min_dist[env_ids] = d
+    env_buffer(env, "_puck_min_dist", lambda: puck_goal_dist(env, asset_cfg).clone())[
+        env_ids
+    ] = d

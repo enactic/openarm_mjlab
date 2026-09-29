@@ -39,7 +39,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ...actions import HoldDefaultPositionActionCfg
-from ...robot_bimanual import (
+from ...openarm_bimanual import (
     BIMANUAL_ACTION_SCALE,
     EE_SITE_RIGHT,
     get_bimanual_robot_cfg,
@@ -153,7 +153,7 @@ def openarm_puck_env_cfg(
             func=base_mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5)
         ),
         "tool_to_puck": ObservationTermCfg(
-            func=puck_mdp.tool_to_puck_obs,
+            func=puck_mdp.tool_to_object_obs,
             params={"robot_cfg": ROBOT_EE_CFG, "asset_cfg": PUCK_CFG},
             noise=Unoise(n_min=-0.01, n_max=0.01),
         ),
@@ -236,7 +236,7 @@ def openarm_puck_env_cfg(
     }
     rewards = {
         "reach_puck": RewardTermCfg(
-            func=puck_mdp.reach_puck_reward,
+            func=puck_mdp.reach_object_reward,
             weight=1.0,
             params={"std": 0.2, "robot_cfg": ROBOT_EE_CFG, "asset_cfg": PUCK_CFG},
         ),
@@ -295,7 +295,7 @@ def openarm_puck_env_cfg(
             func=puck_mdp.puck_at_goal, params={"asset_cfg": PUCK_CFG}
         ),
         "puck_fell": TerminationTermCfg(
-            func=puck_mdp.puck_fell, params={"asset_cfg": PUCK_CFG}
+            func=puck_mdp.object_fell, params={"asset_cfg": PUCK_CFG}
         ),
     }
     cfg = ManagerBasedRlEnvCfg(
