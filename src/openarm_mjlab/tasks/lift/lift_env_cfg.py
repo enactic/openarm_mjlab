@@ -406,7 +406,9 @@ def openarm_lift_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"sensor_name": "finger_block_contact", "asset_cfg": BLOCK_CFG},
         ),
         "block_fell": TerminationTermCfg(
-            func=lift_mdp.object_fell, params={"asset_cfg": BLOCK_CFG}
+            func=base_mdp.root_height_below_minimum,
+            # Table top is z=0.40; anything this low has left the table.
+            params={"minimum_height": 0.30, "asset_cfg": BLOCK_CFG},
         ),
     }
     cfg = ManagerBasedRlEnvCfg(

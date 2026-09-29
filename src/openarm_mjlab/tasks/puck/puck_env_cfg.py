@@ -295,7 +295,9 @@ def openarm_puck_env_cfg(
             func=puck_mdp.puck_at_goal, params={"asset_cfg": PUCK_CFG}
         ),
         "puck_fell": TerminationTermCfg(
-            func=puck_mdp.object_fell, params={"asset_cfg": PUCK_CFG}
+            func=base_mdp.root_height_below_minimum,
+            # Table top is z=0.40; anything this low has left the table.
+            params={"minimum_height": 0.30, "asset_cfg": PUCK_CFG},
         ),
     }
     cfg = ManagerBasedRlEnvCfg(

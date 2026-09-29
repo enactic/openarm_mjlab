@@ -310,15 +310,6 @@ def descent_penalty(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.
     return torch.clamp(-obj.data.root_link_vel_w[:, 2], min=0.0)
 
 
-# Pedestal-scene table top is z=0.40; anything this low has left the table.
-FELL_Z = 0.30
-
-
-def object_fell(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return early termination: the object fell off the table."""
-    return object_pos_w(env, asset_cfg)[:, 2] < FELL_Z
-
-
 def reset_object_xy_uniform(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,

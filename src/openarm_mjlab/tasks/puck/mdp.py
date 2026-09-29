@@ -33,7 +33,6 @@ from ...common_mdp import (
     env_buffer,
     fingers_on_handle,
     fingers_on_handle_obs,
-    object_fell,
     object_pos_w,
     reach_object_reward,
     reset_object_xy_uniform,
@@ -48,7 +47,6 @@ if TYPE_CHECKING:
 __all__ = [
     "fingers_on_handle",
     "fingers_on_handle_obs",
-    "object_fell",
     "reach_object_reward",
     "terminated_by",
     "tool_to_object_obs",

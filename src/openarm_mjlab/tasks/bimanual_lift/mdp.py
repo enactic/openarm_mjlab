@@ -580,7 +580,7 @@ def bar_fell(env, asset_cfg) -> torch.Tensor:
 
     Fell if the bar's center OR either end drops below the floor
 
-    threshold (lift's object_fell used a single point since its block has
+    threshold (lift's block_fell termination used a single point since its block has
     no meaningful extent; the bar can tip, so checking only the center
     could miss an end that slid off the table edge while the center
     stayed higher).

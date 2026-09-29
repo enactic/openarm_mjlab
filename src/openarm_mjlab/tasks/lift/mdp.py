@@ -34,7 +34,6 @@ from ...common_mdp import (
     descent_penalty,
     env_buffer,
     new_progress_rate,
-    object_fell,
     object_pos_w,
     object_speed,
     partial_pinch_reward,
@@ -52,7 +51,6 @@ if TYPE_CHECKING:
 __all__ = [
     "both_pads_on_block",
     "descent_penalty",
-    "object_fell",
     "partial_pinch_reward",
     "pinch_obs",
     "pinch_reward",
@@ -118,7 +116,7 @@ def lift_rate_reward(
 
     New-progress-only, so a plain rise-rate reward cannot be farmed by
     bouncing. Credited progress is capped at ``TARGET_LIFT``: the buffer
-    itself still tracks the TRUE max height (for ``object_fell`` and other
+    itself still tracks the TRUE max height (for the ``block_fell`` termination and other
     bookkeeping), but the reward stops paying once the intended height is
     reached, removing any incentive to keep climbing past the target.
     """
@@ -205,7 +203,7 @@ def reset_held_high(
     Arm at the IK hold pose, fingers pressed to block width, block at the
     tool point, +80mm above the table. The policy must clamp quickly or
     the block slips out: the held-high income stream it forfeits is the
-    real teacher, and ``object_fell`` never fires on a table-height drop.
+    real teacher, and the ``block_fell`` termination never fires on a table-height drop.
     Runs after ``reset_block`` (overrides the subset it picks).
     """
     robot: Entity = env.scene[robot_joints_cfg.name]
