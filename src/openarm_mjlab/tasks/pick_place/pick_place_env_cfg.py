@@ -104,6 +104,8 @@ FINGER_CUBE_SENSOR = ContactSensorCfg(
     num_slots=1,
 )
 _PINCH = {"sensor_name": FINGER_CUBE_SENSOR.name}
+# Carried = pinched with the cube center at TRANSPORT_MIN_Z, clear of the walls.
+_CARRIED = {"carry_min_height": TRANSPORT_MIN_Z, **_PINCH}
 
 
 def get_cube_spec() -> mujoco.MjSpec:
@@ -235,6 +237,7 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "reset_pinch_streak": EventTermCfg(
             func=pick_mdp.reset_pinch_streak, mode="reset"
         ),
+        "reset_carried": EventTermCfg(func=pick_mdp.reset_carried, mode="reset"),
         "fingertip_friction_slide": EventTermCfg(
             mode="startup",
             func=dr.geom_friction,
@@ -315,6 +318,9 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "target_offset": TRAY_TARGET_OFFSET,
             },
         ),
+        # Place and success both require the cube to have been carried (pinched
+        # above the tray walls) this episode: a trained policy otherwise
+        # shoved it into the tray without ever grasping it.
         "place": RewardTermCfg(
             func=pick_mdp.object_in_tray,
             weight=2.0,
@@ -323,6 +329,7 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "tray_name": "tray",
                 "xy_tolerance": TRAY_XY_TOL,
                 "max_height_above_tray": TRAY_MAX_HEIGHT,
+                **_CARRIED,
             },
         ),
         # Terminal bonus (eff. 20 after dt scaling: 1000 * step_dt 0.02) must
@@ -381,6 +388,7 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "max_height_above_tray": SUCCESS_MAX_HEIGHT,
                 "max_speed": SETTLE_MAX_SPEED,
                 "max_ang_speed": SETTLE_MAX_ANG_SPEED,
+                **_CARRIED,
             },
         ),
     }

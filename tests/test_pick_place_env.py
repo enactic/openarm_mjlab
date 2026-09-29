@@ -236,3 +236,84 @@ def test_no_curriculum_ramps_the_velocity_penalty():
     cfg = load_env_cfg("OpenArm-PickPlace")
     assert not cfg.curriculum
     assert cfg.rewards["joint_vel_hinge"].weight == -0.01
+
+
+def _put_cube_in_tray(env):
+    """Teleport the cube (at rest) onto the tray floor, as a push-in would leave it."""
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import CUBE_TRAY_REST_DZ
+
+    cube = env.scene["cube"]
+    state = cube.data.default_root_state.clone()
+    state[:, :3] = env.scene["tray"].data.root_link_pos_w
+    state[:, 2] += CUBE_TRAY_REST_DZ
+    state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    state[:, 7:] = 0.0
+    cube.write_root_state_to_sim(state)
+    env.sim.forward()
+
+
+def _tray_signals(env):
+    from openarm_mjlab.tasks.pick_place import mdp as pick_mdp
+
+    place = pick_mdp.object_in_tray(env, **env.cfg.rewards["place"].params)
+    success = pick_mdp.object_settled_in_tray(
+        env, **env.cfg.terminations["success"].params
+    )
+    return place, success
+
+
+def test_cube_pushed_into_tray_earns_no_place_or_success(env):
+    """Place and success must require carrying: pushing the cube in pays nothing.
+
+    Regression test for a trained policy that shoved the cube into the tray
+    without ever grasping it and still collected place and the success bonus.
+    """
+    env.reset()
+    _put_cube_in_tray(env)
+    place, success = _tray_signals(env)
+    assert not place.any()
+    assert not success.any()
+
+
+def test_carried_cube_set_in_tray_earns_place_and_success(env, monkeypatch):
+    """A cube pinched above the tray walls this episode counts once it is in the tray."""
+    from openarm_mjlab.tasks.pick_place import mdp as pick_mdp
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import TRANSPORT_MIN_Z
+
+    env.reset()
+    cube = env.scene["cube"]
+    state = cube.data.default_root_state.clone()
+    state[:, 2] = TRANSPORT_MIN_Z + 0.01
+    state[:, 7:] = 0.0
+    cube.write_root_state_to_sim(state)
+    env.sim.forward()
+    params = env.cfg.rewards["place"].params
+    # Unpinched above the walls (a flick) does not count as carrying.
+    carried = pick_mdp.object_carried(
+        env, "cube", params["carry_min_height"], params["sensor_name"]
+    )
+    assert not carried.any()
+    monkeypatch.setattr(
+        pick_mdp,
+        "both_pads_on_block",
+        lambda env, name: torch.ones(env.num_envs, dtype=torch.bool),
+    )
+    carried = pick_mdp.object_carried(
+        env, "cube", params["carry_min_height"], params["sensor_name"]
+    )
+    assert carried.all()
+    monkeypatch.undo()
+
+    _put_cube_in_tray(env)
+    place, success = _tray_signals(env)
+    assert place.all()
+    assert success.all()
+
+
+def test_reset_clears_the_carried_flag(env):
+    from openarm_mjlab.tasks.pick_place import mdp as pick_mdp
+
+    env.reset()
+    pick_mdp._carried(env)[:] = True
+    env.reset()
+    assert not pick_mdp._carried(env).any()
