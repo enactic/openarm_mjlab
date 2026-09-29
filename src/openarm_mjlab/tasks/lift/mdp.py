@@ -39,8 +39,10 @@ from ...common_mdp import (
     partial_pinch_reward,
     pinch_obs,
     pinch_reward,
+    pinch_streak_reward,
     reach_object_reward,
     reset_object_xy_uniform,
+    reset_pinch_streak,
     terminated_by,
     tool_to_object_obs,
 )
@@ -54,6 +56,7 @@ __all__ = [
     "partial_pinch_reward",
     "pinch_obs",
     "pinch_reward",
+    "pinch_streak_reward",
     "reach_object_reward",
     "terminated_by",
     "tool_to_object_obs",
@@ -65,36 +68,6 @@ TARGET_LIFT = 0.12  # m above start.
 MAX_LIFT_RATE = 0.3  # m/s
 SETTLED_SPEED = 0.10  # m/s, block speed for "held".
 HEIGHT_TOLERANCE = 0.03  # m; success window is TARGET_LIFT..+30mm.
-
-
-def _pinch_streak(env) -> torch.Tensor:
-    """Return the per-env count of consecutive steps holding a pinch."""
-    return env_buffer(env, "_lift_pinch_streak")
-
-
-# ~0.5s (25 steps), roughly the time a real lift to TARGET_LIFT at
-# MAX_LIFT_RATE would take (0.12 / 0.3 = 0.4s), so full streak credit
-# lines up with "held about as long as lifting takes".
-PINCH_STREAK_CAP = 25.0
-
-
-def pinch_streak_reward(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
-    """Return a graded bonus for SUSTAINED bilateral contact, not just instantaneous contact.
-
-    :func:`pinch_reward` and :func:`partial_pinch_reward` pay identically
-    for a 2-step graze or a 100-step hold, so repeated brief pecks
-    accumulate reward comparable to a genuine sustained grip without ever
-    committing to the harder, more precise control a real lift needs.
-    This term makes duration itself pay: the streak resets to 0 the
-    instant contact breaks, so a peck barely registers, while a genuine
-    hold ramps up to full credit over roughly the time an actual lift
-    takes.
-    """
-    pinched = both_pads_on_block(env, sensor_name)
-    streak = _pinch_streak(env)
-    streak[pinched] += 1.0
-    streak[~pinched] = 0.0
-    return torch.clamp(streak / PINCH_STREAK_CAP, 0.0, 1.0)
 
 
 def lift_height(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -174,7 +147,7 @@ def reset_block_uniform(
     # Reset the new-height buffer (written state has the block at rest on
     # the table: height gained = 0).
     _max_height(env)[env_ids] = 0.0
-    _pinch_streak(env)[env_ids] = 0.0
+    reset_pinch_streak(env, env_ids)
 
 
 # Held-at-height reference-state init: a DLS IK pose holding the tool

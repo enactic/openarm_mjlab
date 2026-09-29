@@ -24,13 +24,13 @@ from mjlab.envs import mdp
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
-from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.manipulation import mdp as manipulation_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -88,6 +88,22 @@ SETTLE_MAX_ANG_SPEED = 1.0
 # Grasp-center site between the fingertips (added in the robot module), so
 # reach/observation terms target where a grasped cube sits, not the wrist.
 EE_SITE = LEFT_GRASP_SITE
+
+# Per-pad contact between the left fingers and the cube; the pinch-gated
+# rewards and observation read it as (inner, outer) pad contact.
+FINGER_CUBE_SENSOR = ContactSensorCfg(
+    name="finger_cube_contact",
+    primary=ContactMatch(
+        mode="body",
+        pattern=r"openarm_left_ee_(inner|outer)_finger",
+        entity="robot",
+    ),
+    secondary=ContactMatch(mode="geom", pattern="cube_geom", entity="cube"),
+    fields=("found",),
+    reduce="none",
+    num_slots=1,
+)
+_PINCH = {"sensor_name": FINGER_CUBE_SENSOR.name}
 
 
 def get_cube_spec() -> mujoco.MjSpec:
@@ -160,6 +176,7 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
         ),
+        "pinch": ObservationTermCfg(func=pick_mdp.pinch_obs, params=_PINCH),
         "actions": ObservationTermCfg(func=mdp.last_action),
     }
     critic_terms = {**actor_terms}
@@ -215,6 +232,9 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("cube"),
             },
         ),
+        "reset_pinch_streak": EventTermCfg(
+            func=pick_mdp.reset_pinch_streak, mode="reset"
+        ),
         "fingertip_friction_slide": EventTermCfg(
             mode="startup",
             func=dr.geom_friction,
@@ -251,19 +271,35 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
 
     rewards = {
-        "reach": RewardTermCfg(
-            func=pick_mdp.object_reach_reward,
+        # mjlab lift_cube's staged reward: reaching * (1 + bringing). Reach
+        # alone saturates once the jaws surround the cube; bringing keeps a
+        # gradient toward the hover target (so upward too) while the gripper
+        # stays on the cube, instead of paying nothing until LIFT_MIN_Z.
+        "reach_bring": RewardTermCfg(
+            func=pick_mdp.staged_reach_bring_reward,
             weight=1.0,
             params={
                 "object_name": "cube",
-                "std": 0.2,
+                "target_name": "tray",
+                "reaching_std": 0.2,
+                "bringing_std": 0.3,
                 "asset_cfg": SceneEntityCfg("robot", site_names=(EE_SITE,)),
+                "target_offset": TRAY_TARGET_OFFSET,
             },
+        ),
+        # Grasp shaping, as in the Lift task: two-pad pinch, one-pad partial
+        # credit, and a streak that pays for holding rather than pecking.
+        "pinch": RewardTermCfg(func=pick_mdp.pinch_reward, weight=0.5, params=_PINCH),
+        "partial_pinch": RewardTermCfg(
+            func=pick_mdp.partial_pinch_reward, weight=0.3, params=_PINCH
+        ),
+        "pinch_streak": RewardTermCfg(
+            func=pick_mdp.pinch_streak_reward, weight=1.5, params=_PINCH
         ),
         "lift": RewardTermCfg(
             func=pick_mdp.object_lifted,
             weight=1.0,
-            params={"object_name": "cube", "minimum_height": LIFT_MIN_Z},
+            params={"object_name": "cube", "minimum_height": LIFT_MIN_Z, **_PINCH},
         ),
         # Weight/std chosen so carrying spawn->tray gains ~+0.9/step over holding
         # in place (the reach+lift baseline is 2.0/step); at 1.0/0.3 the gain was
@@ -290,8 +326,9 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         ),
         # Terminal bonus (eff. 20 after dt scaling: 1000 * step_dt 0.02) must
-        # exceed the discounted return of hovering in-tray without settling
-        # (~5.9 raw/step * 0.02 * gamma/(1-gamma) ~= 11.7 at gamma=0.99), or the
+        # exceed the discounted return of hovering pinched in-tray without
+        # settling (reach_bring ~1.96 + pinch terms 2.3 + place 2 + lift 1 =
+        # ~7.3 raw/step * 0.02 * gamma/(1-gamma) ~= 14.5 at gamma=0.99), or the
         # policy learns to stall just above the success thresholds forever.
         "success_bonus": RewardTermCfg(
             func=pick_mdp.terminated_by,
@@ -348,24 +385,11 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
     }
 
-    curriculum = {
-        "joint_vel_hinge_weight": CurriculumTermCfg(
-            func=manipulation_mdp.reward_curriculum,
-            params={
-                "reward_name": "joint_vel_hinge",
-                "stages": [
-                    {"step": 0, "weight": -0.01},
-                    {"step": 500 * 24, "weight": -0.1},
-                    {"step": 1000 * 24, "weight": -1.0},
-                ],
-            },
-        ),
-    }
-
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             num_envs=1,
             env_spacing=1.0,
+            sensors=(FINGER_CUBE_SENSOR,),
             entities={
                 "robot": get_openarm_robot_cfg(),
                 "cube": EntityCfg(
@@ -383,7 +407,6 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         events=events,
         rewards=rewards,
         terminations=terminations,
-        curriculum=curriculum,
         viewer=ViewerConfig(
             # Fixed view matching cell.xml's camera_head_right: above the arm
             # bases, looking forward-down (+x) at the table workspace.
@@ -412,6 +435,5 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if play:
         cfg.episode_length_s = int(1e9)
         cfg.observations["actor"].enable_corruption = False
-        cfg.curriculum = {}
 
     return cfg

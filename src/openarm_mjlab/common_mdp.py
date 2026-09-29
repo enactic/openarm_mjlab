@@ -176,6 +176,37 @@ def partial_pinch_reward(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tens
     return _pads_touching(env, sensor_name).float().mean(dim=-1)
 
 
+def _pinch_streak(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Return the per-env count of consecutive steps holding a pinch."""
+    return env_buffer(env, "_pinch_streak")
+
+
+def pinch_streak_reward(
+    env: ManagerBasedRlEnv, sensor_name: str, cap: float = 25.0
+) -> torch.Tensor:
+    """Return a graded bonus for SUSTAINED bilateral contact, not just instantaneous contact.
+
+    :func:`pinch_reward` and :func:`partial_pinch_reward` pay identically
+    for a 2-step graze or a 100-step hold, so repeated brief pecks
+    accumulate reward comparable to a genuine sustained grip without ever
+    committing to the harder, more precise control a real lift needs.
+    This term makes duration itself pay: the streak resets to 0 the
+    instant contact breaks, so a peck barely registers, while a genuine
+    hold ramps up to full credit over ``cap`` steps. The default ~0.5 s
+    (25 steps at 50 Hz) is roughly the time a lift itself takes.
+    """
+    pinched = both_pads_on_block(env, sensor_name)
+    streak = _pinch_streak(env)
+    streak[pinched] += 1.0
+    streak[~pinched] = 0.0
+    return torch.clamp(streak / cap, 0.0, 1.0)
+
+
+def reset_pinch_streak(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+    """Reset event: clear the pinch streak for the given envs."""
+    _pinch_streak(env)[env_ids] = 0.0
+
+
 ##
 # Tool point.
 ##

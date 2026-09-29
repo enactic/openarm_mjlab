@@ -24,7 +24,8 @@ import torch
 import openarm_mjlab.tasks  # noqa: F401  # Registers tasks.
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 
-OBS_DIM = 9 + 9 + 3 + 3 + 8  # joint_pos, joint_vel, ee_to_cube, cube_to_tray, actions
+OBS_DIM = 9 + 9 + 3 + 3 + 1 + 8  # joint_pos, joint_vel, ee_to_cube, cube_to_tray,
+# pinch, actions
 
 
 def test_task_is_registered():
@@ -110,3 +111,128 @@ def test_nan_env_recovers_via_termination(env):
     obs, rew, terminated, truncated, _ = env.step(action)
     assert torch.isfinite(obs["actor"]).all()
     assert not terminated[0]
+
+
+def _place_cube_at_grasp_site(env):
+    """Teleport the cube (at rest) to the grasp-center site between the open jaws."""
+    from openarm_mjlab.openarm_cell import LEFT_GRASP_SITE
+
+    robot = env.scene["robot"]
+    cube = env.scene["cube"]
+    site = robot.site_names.index(LEFT_GRASP_SITE)
+    state = cube.data.default_root_state.clone()
+    state[:, :3] = robot.data.site_pos_w[:, site]
+    state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    state[:, 7:] = 0.0
+    cube.write_root_state_to_sim(state)
+
+
+def test_closing_the_jaw_on_the_cube_registers_a_pinch_and_holds_it(env):
+    """The finger-cube sensor must see a two-pad pinch once the jaw shuts on the cube.
+
+    The pinch-gated rewards are only a learning signal if a genuine grasp
+    actually trips them, and the grasp must hold the cube up against gravity.
+    """
+    from openarm_mjlab.common_mdp import both_pads_on_block
+
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import (
+        FINGER_CUBE_SENSOR,
+        LIFT_MIN_Z,
+    )
+
+    env.reset()
+    term = env.action_manager.get_term("joint_pos")
+    finger = term.target_names.index("openarm_left_finger_joint1")
+    action = torch.zeros(2, env.action_manager.total_action_dim)
+    action[:, finger] = -1.0  # Shut the jaw; hold the arm at home.
+    # Pin the cube at the grasp center while the jaw closes, so it is caught
+    # between the pads rather than dropping into the finger cage first.
+    for _ in range(25):
+        _place_cube_at_grasp_site(env)
+        env.step(action)
+    for _ in range(25):  # Released: the pinch alone must hold it for 0.5 s.
+        env.step(action)
+    assert both_pads_on_block(env, FINGER_CUBE_SENSOR.name).all()
+    assert (env.scene["cube"].data.root_link_pos_w[:, 2] > LIFT_MIN_Z).all()
+
+
+def test_lift_does_not_pay_for_an_unpinched_airborne_cube(env):
+    """A cube knocked into the air (no grasp) must not earn the lift reward."""
+    from openarm_mjlab.tasks.pick_place import mdp as pick_mdp
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import (
+        FINGER_CUBE_SENSOR,
+        LIFT_MIN_Z,
+    )
+
+    env.reset()
+    cube = env.scene["cube"]
+    state = cube.data.default_root_state.clone()
+    state[:, 2] = LIFT_MIN_Z + 0.05
+    state[:, 7:] = 0.0
+    cube.write_root_state_to_sim(state)
+    env.sim.forward()
+    assert (cube.data.root_link_pos_w[:, 2] > LIFT_MIN_Z).all()
+    lifted = pick_mdp.object_lifted(
+        env, "cube", LIFT_MIN_Z, sensor_name=FINGER_CUBE_SENSOR.name
+    )
+    assert (lifted == 0.0).all()
+
+
+def test_staged_reward_is_reaching_times_one_plus_bringing(env):
+    """Staged reward follows mjlab's lift_cube: reaching * (1 + bringing).
+
+    Moving the cube toward the hover target must raise it while the gripper
+    stays on the cube, so height and transport always carry a gradient.
+    """
+    from openarm_mjlab.tasks.pick_place import mdp as pick_mdp
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import (
+        EE_SITE,
+        TRAY_TARGET_OFFSET,
+    )
+    from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+    env.reset()
+    robot_cfg = SceneEntityCfg("robot", site_names=(EE_SITE,))
+    robot_cfg.resolve(env.scene)
+    params = dict(
+        object_name="cube",
+        target_name="tray",
+        reaching_std=0.2,
+        bringing_std=0.3,
+        asset_cfg=robot_cfg,
+        target_offset=TRAY_TARGET_OFFSET,
+    )
+    robot = env.scene["robot"]
+    cube = env.scene["cube"]
+    tray = env.scene["tray"]
+
+    def expected():
+        ee = robot.data.site_pos_w[:, robot_cfg.site_ids].squeeze(1)
+        obj = cube.data.root_link_pos_w
+        target = tray.data.root_link_pos_w + torch.tensor(TRAY_TARGET_OFFSET)
+        reaching = torch.exp(-((ee - obj) ** 2).sum(-1) / 0.2**2)
+        bringing = torch.exp(-((target - obj) ** 2).sum(-1) / 0.3**2)
+        return reaching * (1.0 + bringing)
+
+    on_table = pick_mdp.staged_reach_bring_reward(env, **params)
+    torch.testing.assert_close(on_table, expected())
+
+    # Raise the cube halfway toward the hover target, keeping it on the gripper
+    # side: the reward must grow.
+    state = cube.data.default_root_state.clone()
+    obj = cube.data.root_link_pos_w.clone()
+    target = tray.data.root_link_pos_w + torch.tensor(TRAY_TARGET_OFFSET)
+    state[:, :3] = obj + 0.5 * (target - obj)
+    state[:, 7:] = 0.0
+    cube.write_root_state_to_sim(state)
+    env.sim.forward()
+    raised = pick_mdp.staged_reach_bring_reward(env, **params)
+    torch.testing.assert_close(raised, expected())
+    assert (raised > on_table).all()
+
+
+def test_no_curriculum_ramps_the_velocity_penalty():
+    """The hinge penalty must stay fixed: ramping it 100x mid-run froze exploration."""
+    cfg = load_env_cfg("OpenArm-PickPlace")
+    assert not cfg.curriculum
+    assert cfg.rewards["joint_vel_hinge"].weight == -0.01
