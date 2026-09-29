@@ -14,15 +14,17 @@
 
 """Environment configuration for the OpenArm pick & place task."""
 
+import dataclasses
 import math
 
 import mujoco
 
-from mjlab.entity import EntityCfg
+from mjlab.actuator import IdealPdActuatorCfg, XmlActuatorCfg
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp
 from mjlab.envs.mdp import dr
-from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.envs.mdp.actions import JointEffortActionCfg, JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -37,10 +39,10 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ...openarm_cell import (
-    LEFT_FINGER_HOME,
     LEFT_FINGERTIP_GEOMS,
     LEFT_GRASP_SITE,
     TABLE_TOP_Z,
+    get_openarm_cell_spec,
     get_openarm_robot_cfg,
 )
 from . import mdp as pick_mdp
@@ -150,6 +152,65 @@ def get_tray_spec() -> mujoco.MjSpec:
     return spec
 
 
+LEFT_FINGER_JOINT = "openarm_left_finger_joint1"
+# The asset's own finger servo cap (left_finger1_ctrl forcerange).
+FINGER_EFFORT_LIMIT = 7.0
+# Same as the Lift task's squeeze: a one-sigma exploration action is 2 N*m.
+SQUEEZE_SCALE = 2.0
+# Episodes start with the jaw just wider than the cube, like the Lift task's
+# home. Both pads first touch the 4 cm cube at 0.17-0.20 rad across yaws
+# (measured), so 0.30 still straddles it; from the fully open 0.785 the
+# asset's finger damping (~0.5 rad/s at 2 N*m) kept zero-mean exploration
+# from ever reaching the cube.
+FINGER_START = 0.30
+
+
+def get_pick_place_spec() -> mujoco.MjSpec:
+    """Return the Cell spec without the left finger's XML position servo.
+
+    mjlab keeps XML actuators no actuator config claims, so the servo would
+    otherwise keep pulling the jaw toward its target against the squeeze.
+    """
+    spec = get_openarm_cell_spec()
+    spec.delete(spec.actuator("left_finger1_ctrl"))
+    return spec
+
+
+def get_pick_place_robot_cfg() -> EntityCfg:
+    """Return the Cell robot with an effort-driven left finger, as in the Lift task.
+
+    Under position control the finger target is home (open) plus the action,
+    so zero-mean exploration keeps the jaw open on average and closing needs
+    a sustained action below -0.8: trained policies never closed on the cube.
+    A torque command instead integrates, so exploration regularly drives the
+    jaw to its closed stop, and the policy sets the squeeze force directly.
+    """
+    cfg = get_openarm_robot_cfg()
+    cfg.spec_fn = get_pick_place_spec
+    cfg.init_state = dataclasses.replace(
+        cfg.init_state,
+        joint_pos={
+            **cfg.init_state.joint_pos,
+            "openarm_left_finger_joint1": FINGER_START,
+            "openarm_left_finger_joint2": FINGER_START,
+        },
+    )
+    cfg.articulation = EntityArticulationInfoCfg(
+        actuators=(
+            XmlActuatorCfg(target_names_expr=("openarm_left_joint[1-7]",)),
+            IdealPdActuatorCfg(
+                target_names_expr=(LEFT_FINGER_JOINT,),
+                stiffness=0.0,
+                # The removed servo's kv; the joint keeps its own damping too.
+                damping=0.2,
+                effort_limit=FINGER_EFFORT_LIMIT,
+            ),
+        ),
+        soft_joint_pos_limit_factor=0.9,
+    )
+    return cfg
+
+
 def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Build the OpenArm pick & place environment config."""
     actor_terms = {
@@ -191,22 +252,17 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     actions: dict[str, ActionTermCfg] = {
         "joint_pos": JointPositionActionCfg(
             entity_name="robot",
-            actuator_names=(
-                "openarm_left_joint[1-7]",
-                "openarm_left_finger_joint1",
-            ),
-            # use_default_offset puts each offset at the home pose, and the
-            # asset's home jaw is fully OPEN at the top of the finger range.
-            # A finger action therefore only has room to close, so its scale
-            # spans the whole range: action -1 shuts the jaw, 0 holds it open.
-            # A smaller scale cannot reach a grasp at all — the 4 cm cube needs
-            # the jaw below ~0.16 rad, which 0.4 never reaches from 0.7854.
-            scale={
-                "openarm_left_joint[1-7]": 0.5,
-                "openarm_left_finger_joint1": LEFT_FINGER_HOME,
-            },
+            actuator_names=("openarm_left_joint[1-7]",),
+            scale=0.5,
             use_default_offset=True,
-        )
+        ),
+        # Negative squeezes the jaw shut, positive opens it (see
+        # get_pick_place_robot_cfg for why the finger is effort-driven).
+        "squeeze": JointEffortActionCfg(
+            entity_name="robot",
+            actuator_names=(LEFT_FINGER_JOINT,),
+            scale=SQUEEZE_SCALE,
+        ),
     }
 
     events = {
@@ -399,7 +455,7 @@ def openarm_pick_place_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             env_spacing=1.0,
             sensors=(FINGER_CUBE_SENSOR,),
             entities={
-                "robot": get_openarm_robot_cfg(),
+                "robot": get_pick_place_robot_cfg(),
                 "cube": EntityCfg(
                     init_state=EntityCfg.InitialStateCfg(pos=CUBE_SPAWN_POS),
                     spec_fn=get_cube_spec,

@@ -68,22 +68,92 @@ def test_env_steps_with_finite_signals(env):
         assert truncated.shape == (2,)
 
 
-def test_gripper_action_reaches_the_closed_jaw(env):
-    """Action -1 must shut the jaw, or the policy can never grasp the cube.
+def _squeeze_action(env, value: float) -> torch.Tensor:
+    """Zero arm action (hold home) with the squeeze term set to ``value``."""
+    action = torch.zeros(env.num_envs, env.action_manager.total_action_dim)
+    start = 0
+    for name in env.action_manager.active_terms:
+        dim = env.action_manager.get_term(name).action_dim
+        if name == "squeeze":
+            action[:, start : start + dim] = value
+        start += dim
+    return action
 
-    `use_default_offset` anchors the finger offset to the home pose, which the
-    asset defines as the fully OPEN jaw, so the scale has to span the whole
-    finger range for the closed jaw to be reachable inside the nominal action
-    band. Regression test for openarm-mujoco 2.3.0, which moved home from the
-    closed jaw to the open one and left the old scale unable to reach a grasp.
+
+def _jaw(env) -> torch.Tensor:
+    robot = env.scene["robot"]
+    return robot.data.joint_pos[
+        :, robot.joint_names.index("openarm_left_finger_joint1")
+    ]
+
+
+def test_finger_is_driven_by_the_squeeze_effort_alone(env):
+    """The finger's XML position servo must be gone, or it fights the effort.
+
+    A leftover position actuator would keep pulling the jaw back to its
+    target, so the policy's squeeze torque would never be the only drive.
+    """
+    model = env.sim.mj_model
+    import mujoco
+
+    finger = model.joint("robot/openarm_left_finger_joint1").id
+    on_finger = [
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a)
+        for a in range(model.nu)
+        if model.actuator_trnid[a, 0] == finger
+    ]
+    assert len(on_finger) == 1, on_finger
+    assert "squeeze" in env.action_manager.active_terms
+    assert env.action_manager.total_action_dim == 8
+
+
+def test_squeeze_action_shuts_and_opens_the_jaw_within_its_range(env):
+    """Sustained -1 must shut the jaw and +1 reopen it, without breaching the limits.
+
+    Effort control drives the jaw to an end stop instead of to a target, so a
+    soft joint limit would let it overshoot past 0 (closed) or 0.785 (open).
     """
     from openarm_mjlab.openarm_cell import LEFT_FINGER_HOME
 
-    term = env.action_manager.get_term("joint_pos")
-    i = term.target_names.index("openarm_left_finger_joint1")
-    assert term.offset[0, i].item() == pytest.approx(LEFT_FINGER_HOME)
-    # action -1 lands on the closed jaw (qpos 0), not short of it.
-    assert (term.offset[0, i] - term.scale[0, i]).item() == pytest.approx(0.0)
+    # The asset's finger damping caps a 2 N*m squeeze at ~0.5 rad/s, so a
+    # full stroke takes ~1.6 s (80 steps).
+    env.reset()
+    for _ in range(50):
+        env.step(_squeeze_action(env, -1.0))
+    assert (_jaw(env) < 0.05).all()
+    assert (_jaw(env) > -0.02).all()
+    for _ in range(100):
+        env.step(_squeeze_action(env, 1.0))
+    assert (_jaw(env) > LEFT_FINGER_HOME - 0.05).all()
+    assert (_jaw(env) < LEFT_FINGER_HOME + 0.02).all()
+
+
+@pytest.mark.parametrize("yaw_deg", [0.0, 22.5, 45.0])
+def test_start_jaw_straddles_the_cube_and_a_short_squeeze_pinches_it(env, yaw_deg):
+    """Episodes start with the jaw just wider than the cube, as the Lift task does.
+
+    From fully open, zero-mean exploration never drove the damped jaw the
+    ~0.6 rad down to the cube; starting near grasp width, the open jaw still
+    clears the cube at any yaw, and a brief squeeze closes it on the pads.
+    """
+    import math
+
+    from openarm_mjlab.common_mdp import both_pads_on_block
+    from openarm_mjlab.tasks.pick_place.pick_place_env_cfg import FINGER_CUBE_SENSOR
+
+    yaw = math.radians(yaw_deg)
+    quat = torch.tensor([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
+    env.reset()
+    for _ in range(5):  # Zero squeeze: the start jaw must not touch the cube.
+        _place_cube_at_grasp_site(env, quat)
+        env.step(_squeeze_action(env, 0.0))
+        assert not both_pads_on_block(env, FINGER_CUBE_SENSOR.name).any()
+    # 0.5 s of full squeeze: ~0.15 rad of travel at ~0.5 rad/s, with margin
+    # for the +-0.05 rad reset jitter on the start jaw.
+    for _ in range(25):
+        _place_cube_at_grasp_site(env, quat)
+        env.step(_squeeze_action(env, -1.0))
+    assert both_pads_on_block(env, FINGER_CUBE_SENSOR.name).all()
 
 
 def test_cube_spawns_on_table_after_reset(env):
@@ -113,7 +183,7 @@ def test_nan_env_recovers_via_termination(env):
     assert not terminated[0]
 
 
-def _place_cube_at_grasp_site(env):
+def _place_cube_at_grasp_site(env, quat=None):
     """Teleport the cube (at rest) to the grasp-center site between the open jaws."""
     from openarm_mjlab.openarm_cell import LEFT_GRASP_SITE
 
@@ -122,7 +192,7 @@ def _place_cube_at_grasp_site(env):
     site = robot.site_names.index(LEFT_GRASP_SITE)
     state = cube.data.default_root_state.clone()
     state[:, :3] = robot.data.site_pos_w[:, site]
-    state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0]) if quat is None else quat
     state[:, 7:] = 0.0
     cube.write_root_state_to_sim(state)
 
@@ -141,10 +211,7 @@ def test_closing_the_jaw_on_the_cube_registers_a_pinch_and_holds_it(env):
     )
 
     env.reset()
-    term = env.action_manager.get_term("joint_pos")
-    finger = term.target_names.index("openarm_left_finger_joint1")
-    action = torch.zeros(2, env.action_manager.total_action_dim)
-    action[:, finger] = -1.0  # Shut the jaw; hold the arm at home.
+    action = _squeeze_action(env, -1.0)  # Shut the jaw; hold the arm at home.
     # Pin the cube at the grasp center while the jaw closes, so it is caught
     # between the pads rather than dropping into the finger cage first.
     for _ in range(25):
