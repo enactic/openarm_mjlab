@@ -370,10 +370,14 @@ def openarm_valve_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # that, so the artifact only shows up in recorded video.
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.WORLD,
-            lookat=(0.30, 0.0, 0.52),
-            distance=1.6,
+            # Framed between the valve and the shoulders: the lever is only
+            # ~6 cm, so the wide table shot used by the other tasks hides
+            # what the gripper is doing, but the whole arm should stay in
+            # frame.
+            lookat=(0.16, -0.05, 0.55),
+            distance=0.85,
             elevation=-20.0,
-            azimuth=200.0,
+            azimuth=212.0,
         ),
         sim=SimulationCfg(
             nconmax=150,
