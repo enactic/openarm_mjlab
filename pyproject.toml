@@ -24,6 +24,7 @@ requires-python = ">=3.11"
 dependencies = [
   "openarm-mujoco",
   "mjlab>=1.5.0",
+  "onnxruntime>=1.20",
 ]
 
 [project.urls]
@@ -32,6 +33,7 @@ Issues = "https://github.com/enactic/openarm_mjlab/issues"
 Repository = "https://github.com/enactic/openarm_mjlab"
 
 [project.scripts]
+openarm-mjlab-export-policy = "openarm_mjlab.deploy.export:main"
 openarm-mjlab-play = "openarm_mjlab.play:main"
 openarm-mjlab-train = "openarm_mjlab.train:main"
 
