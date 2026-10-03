@@ -26,12 +26,21 @@ dependencies = [
   "mjlab>=1.5.0",
 ]
 
+[project.optional-dependencies]
+# Imported only by the instruction-table build step. Training and evaluation
+# read the built table, so the encoder is never a runtime dependency.
+language = ["sentence-transformers>=3.0"]
+
 [project.urls]
 Changelog = "https://github.com/enactic/openarm_mjlab/releases"
 Issues = "https://github.com/enactic/openarm_mjlab/issues"
 Repository = "https://github.com/enactic/openarm_mjlab"
 
 [project.scripts]
+openarm-mjlab-build-instructions = "openarm_mjlab.tasks.language.embeddings:main"
+openarm-mjlab-lang-check = "openarm_mjlab.tasks.language.cli:check"
+openarm-mjlab-lang-eval = "openarm_mjlab.tasks.language.cli:evaluate"
+openarm-mjlab-lang-play = "openarm_mjlab.tasks.language.cli:play"
 openarm-mjlab-play = "openarm_mjlab.play:main"
 openarm-mjlab-train = "openarm_mjlab.train:main"
 
