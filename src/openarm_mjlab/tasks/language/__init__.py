@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-*.egg-info
-/.venv
-/MUJOCO_LOG.TXT
-/build/
-/dist/
-/logs/
-/uv.lock
-/wandb
-__pycache__/
+"""Language-conditioned manipulation: the target is named, not observed."""
 
-# Built by openarm-mjlab-build-instructions; depends on the chosen encoder.
-src/openarm_mjlab/tasks/language/instruction_embeddings.pt
+from mjlab.tasks.registry import register_mjlab_task
+
+from openarm_mjlab.tasks.language.env_cfg import (
+    openarm_language_puck_env_cfg,
+    openarm_language_puck_ppo_runner_cfg,
+)
+
+register_mjlab_task(
+    task_id="OpenArm-Puck-Language",
+    env_cfg=openarm_language_puck_env_cfg(),
+    play_env_cfg=openarm_language_puck_env_cfg(play=True),
+    rl_cfg=openarm_language_puck_ppo_runner_cfg(),
+)
