@@ -21,3 +21,6 @@
 /uv.lock
 /wandb
 __pycache__/
+
+# Built by openarm-mjlab-build-instructions; depends on the chosen encoder.
+src/openarm_mjlab/tasks/language/instruction_embeddings.pt
